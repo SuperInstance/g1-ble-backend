@@ -703,6 +703,19 @@ class EvenG1Controller:
 
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._packet_log: list[tuple[str, bytes]] = []
+        self._listeners: list[Callable[[str, bytes], None]] = []
+
+    def add_listener(self, fn: Callable[[str, bytes], None]) -> Callable[[str, bytes], None]:
+        """
+        Register a synchronous observer for incoming packets.
+
+        Listeners receive ``(side, raw_bytes)`` for every notification, after
+        the packet has been recorded and printed. They must not block: the
+        callback runs on the BLE notification path. Schedule any real work as a
+        task. Returns the callback so it can be used as a decorator.
+        """
+        self._listeners.append(fn)
+        return fn
 
     # -- discovery ---------------------------------------------------------
 
@@ -936,6 +949,14 @@ class EvenG1Controller:
         while you map out TouchBar input packets.
         """
         self._packet_log.append((arm.identity.side or "?", data))
+
+        # Observers run after recording and printing, and are isolated: one
+        # misbehaving listener must not break the BLE notification path.
+        for listener in tuple(self._listeners):
+            try:
+                listener(arm.identity.side or "?", data)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("packet listener raised: %s", exc)
 
         if not self.echo_packets:
             return

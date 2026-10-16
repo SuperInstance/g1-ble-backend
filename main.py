@@ -5,35 +5,37 @@ main.py
 
 CLI entry point for the Even Realities G1 developer backend.
 
-Runs a two-stage AI pipeline and mirrors the result onto the waveguide:
+Owns the BLE connection and the interactive session. The LLM pipeline lives in
+``pipeline.py``, reaction history in ``memory.py``, and card lifecycle /
+drill-down in ``session.py`` — this module wires them together and does not
+reimplement any of their logic.
 
-    terminal query
+    terminal query / TouchBar tap
         |
         v
-    [ STAGE 1 ]  generate_primary_response()   heavy "thinker" model
-        |          full, long-form answer, no length constraint
-        v
-    [ STAGE 2 ]  condense_for_glasses()        waveguide micro-compressor
-        |          strict structural filter -> <= 25 words, no filler
-        v
-    [ BLE WRITE ] controller.send_text_packet() 0x4E packet -> both arms
-                   (inside a try/except so a failed LLM call can never
-                    tear down the active Bluetooth session)
+    Session.ask() / Session.more()
+        |
+        +-> pipeline.run_query()   stage 1 reason -> stage 2 compress
+        |       |
+        |       v
+        |   EvenG1Controller.send_text_packet()   0x4E -> both arms
+        |
+        +-> memory.FeedbackStore     cards + reactions, persisted locally
+        |
+        +-> plugins                  optional role overrides / refinement
 
-Why two stages instead of one prompt: the heavy model is optimised for
-reasoning quality and produces long answers that are unreadable in a
-~25-word HUD window. Asking that same model to also compress tends to
-degrade the reasoning. Splitting the roles keeps the thinking deep and
-makes the display formatting a separate, cheap, easily-tunable step.
+Every stage failure is contained: the display always receives a payload and
+the BLE connection is never torn down by an upstream error.
 
 Examples::
 
     python main.py --selftest                # offline checks, no radio, no API key
-    python main.py --llm-check               # verify LLM config without BLE
-    python main.py                            # scan, connect, interactive REPL
-    python main.py --one-shot                 # literal text, no LLM
-    python main.py --ask "why is the sky blue"  # single pipeline run, then exit
-    python main.py --scan-only                # list what is advertising
+    python main.py --llm-check               # probe the LLM path only
+    python main.py --provider ollama         # local model, no key needed
+    python main.py                            # interactive session
+    python main.py --ask "why is the sky blue"
+    python main.py --one-shot --text "hello"  # literal text, no LLM
+    python main.py --scan-only               # list what advertises
 """
 
 from __future__ import annotations
@@ -42,686 +44,50 @@ import argparse
 import asyncio
 import contextlib
 import logging
-import os
-import re
 import sys
 import time
-from dataclasses import dataclass
 
 from bleak import BleakBackend
 from bleak.backends import get_default_backend
 from bleak.exc import BleakError
 
-from g1_driver import EvenG1Controller, hexdump, selftest
+from g1_driver import EvenG1Controller, hexdump
+from memory import FeedbackStore
+from pipeline import (
+    DEFAULT_MAX_DISPLAY_CHARS,
+    DEFAULT_MAX_DISPLAY_WORDS,
+    DISPLAY_LINES,
+    LLMConfig,
+    LLMStageError,
+    LLMUnavailable,
+    PROVIDERS,
+    build_llm_config,
+    condense_for_glasses,
+    describe_llm_config,
+    enforce_display_budget,
+    ensure_models,
+    fits_display,
+    generate_primary_response,
+    list_available_models,
+    make_client,
+    run_query,
+    strip_display_noise,
+    word_count,
+)
+from session import (
+    DEFAULT_TOUCH_ACTIONS,
+    UNMAPPED_TOUCH_EVENTS,
+    Session,
+)
 
 log = logging.getLogger("g1")
 
 DEFAULT_TEST_TEXT = "Terminal connection established. System online."
 DEFAULT_HOLD_SECONDS = 30.0
 
-# Physical limit of the G1 waveguide. The official app fits ~24 characters
-# per line and ~5 lines per screen; 25 words is a conservative upper bound
-# that keeps a single response inside one screen.
-DEFAULT_MAX_DISPLAY_WORDS = 25
-
 
 # ---------------------------------------------------------------------------
-# LLM configuration
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Provider:
-    """
-    A known endpoint that speaks the OpenAI Chat Completions protocol.
-
-    These are presets, not a whitelist. Any OpenAI-compatible server works by
-    setting a base URL, and anything not listed here can be used via the
-    ``custom`` provider or by pointing ``OPENAI_BASE_URL`` at it directly.
-    """
-
-    name: str
-    base_url: str | None
-    key_env: tuple[str, ...]
-    default_primary: str | None
-    default_compressor: str | None
-    local: bool = False  # local servers generally do not validate the API key
-
-
-PROVIDERS: dict[str, Provider] = {
-    "openai": Provider(
-        "openai", None, ("OPENAI_API_KEY",),
-        "gpt-4o-mini", "gpt-4o-mini",
-    ),
-    "ollama": Provider(
-        "ollama", "http://127.0.0.1:11434/v1", ("OLLAMA_API_KEY",),
-        None, None, local=True,
-    ),
-    "lmstudio": Provider(
-        "lmstudio", "http://127.0.0.1:1234/v1", ("LMSTUDIO_API_KEY",),
-        None, None, local=True,
-    ),
-    "llamacpp": Provider(
-        "llamacpp", "http://127.0.0.1:8080/v1", ("LLAMACPP_API_KEY",),
-        None, None, local=True,
-    ),
-    "vllm": Provider(
-        "vllm", "http://127.0.0.1:8000/v1", ("VLLM_API_KEY",),
-        None, None, local=True,
-    ),
-    "openrouter": Provider(
-        "openrouter", "https://openrouter.ai/api/v1", ("OPENROUTER_API_KEY",),
-        "openai/gpt-4o-mini", "openai/gpt-4o-mini",
-    ),
-    "groq": Provider(
-        "groq", "https://api.groq.com/openai/v1", ("GROQ_API_KEY",),
-        "llama-3.3-70b-versatile", "llama-3.1-8b-instant",
-    ),
-    "together": Provider(
-        "together", "https://api.together.xyz/v1", ("TOGETHER_API_KEY",),
-        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    ),
-    "deepseek": Provider(
-        "deepseek", "https://api.deepseek.com/v1", ("DEEPSEEK_API_KEY",),
-        "deepseek-chat", "deepseek-chat",
-    ),
-    # Escape hatch: base URL and models come entirely from the environment.
-    "custom": Provider("custom", None, ("OPENAI_API_KEY", "G1_API_KEY"),
-                       None, None, local=False),
-}
-
-# Placeholder sent when a local server ignores the key entirely. The OpenAI
-# SDK refuses to build a client without *some* key value.
-LOCAL_PLACEHOLDER_KEY = "not-needed"
-
-
-@dataclass
-class LLMConfig:
-    """
-    Runtime configuration for both pipeline stages.
-
-    Resolved from a provider preset plus environment overrides, so the same
-    code runs against a cloud API or a local model server unchanged.
-    """
-
-    api_key: str | None
-    base_url: str | None
-    primary_model: str | None
-    compressor_model: str | None
-    timeout: float
-    max_retries: int
-    max_display_words: int
-    provider: str = "custom"
-
-    @property
-    def target(self) -> str:
-        """Human-readable description of where requests are going."""
-        return self.base_url or "https://api.openai.com/v1"
-
-    @property
-    def is_local(self) -> bool:
-        return PROVIDERS.get(self.provider, PROVIDERS["custom"]).local
-
-
-def build_llm_config(provider: str | None = None) -> LLMConfig:
-    """
-    Resolve LLM settings from a provider preset plus environment overrides.
-
-    Resolution order, lowest priority last:
-
-    1. ``--provider`` / ``G1_PROVIDER`` selects a preset (default ``openai``).
-    2. ``OPENAI_BASE_URL`` / ``G1_BASE_URL`` override the preset's base URL.
-    3. The first populated key variable wins: the provider's own key variable,
-       then ``OPENAI_API_KEY`` / ``G1_API_KEY``.
-    4. ``G1_PRIMARY_MODEL`` / ``OPENAI_MODEL`` / ``G1_COMPRESSOR_MODEL``
-       override model names.
-
-    Nothing is hardcoded to one vendor. Any server implementing
-    ``POST {base_url}/chat/completions`` works.
-    """
-    name = (provider or os.environ.get("G1_PROVIDER") or "openai").strip().lower()
-    preset = PROVIDERS.get(name)
-    if preset is None:
-        raise LLMUnavailable(
-            f"unknown provider {name!r}. Known: {', '.join(sorted(PROVIDERS))}.\n"
-            f"    Or set OPENAI_BASE_URL directly for any OpenAI-compatible server."
-        )
-
-    base_url = (
-        os.environ.get("OPENAI_BASE_URL")
-        or os.environ.get("G1_BASE_URL")
-        or preset.base_url
-    )
-
-    # First populated key wins; local servers get a placeholder if nothing set.
-    api_key: str | None = None
-    for var in (*preset.key_env, "OPENAI_API_KEY", "G1_API_KEY"):
-        value = os.environ.get(var)
-        if value:
-            api_key = value
-            break
-    if api_key is None and preset.local:
-        api_key = LOCAL_PLACEHOLDER_KEY
-
-    primary = (
-        os.environ.get("G1_PRIMARY_MODEL")
-        or os.environ.get("OPENAI_MODEL")
-        or preset.default_primary
-    )
-    compressor = os.environ.get("G1_COMPRESSOR_MODEL") or preset.default_compressor
-
-    def _float(name: str, default: float) -> float:
-        raw = os.environ.get(name)
-        if not raw:
-            return default
-        try:
-            return float(raw)
-        except ValueError:
-            print(f"  ! {name}={raw!r} is not a number; using {default}", file=sys.stderr)
-            return default
-
-    return LLMConfig(
-        api_key=api_key,
-        base_url=base_url,
-        primary_model=primary,
-        compressor_model=compressor,
-        timeout=_float("G1_LLM_TIMEOUT", 30.0),
-        max_retries=int(os.environ.get("G1_LLM_RETRIES", "2") or 2),
-        max_display_words=int(
-            os.environ.get("G1_MAX_DISPLAY_WORDS", str(DEFAULT_MAX_DISPLAY_WORDS))
-            or DEFAULT_MAX_DISPLAY_WORDS
-        ),
-        provider=preset.name,
-    )
-
-
-def describe_llm_config(config: LLMConfig) -> str:
-    """One-line summary of the active LLM wiring, for the startup banner."""
-    key_state = "set" if config.api_key else "MISSING"
-    same = " (same as stage 1)" if config.compressor_model == config.primary_model else ""
-    return (
-        f"provider={config.provider}  target={config.target}  "
-        f"stage1={config.primary_model}  stage2={config.compressor_model}{same}  "
-        f"key={key_state}"
-    )
-
-
-def make_client(config: LLMConfig):
-    """
-    Build an ``AsyncOpenAI`` client.
-
-    The import is deliberately lazy: the BLE half of this tool is fully
-    functional without the ``openai`` package or an API key, and a user
-    debugging TouchBar packets should not have to install anything extra.
-
-    Chat Completions (``/v1/chat/completions``) is used rather than the
-    OpenAI-only Responses API because every common local server implements it.
-    """
-    try:
-        from openai import AsyncOpenAI
-    except ImportError:
-        raise LLMUnavailable(
-            "the 'openai' package is not installed.\n"
-            "    fix: pip install -r requirements.txt"
-        ) from None
-
-    if not config.api_key:
-        raise LLMUnavailable(
-            f"no API key found for provider {config.provider!r}.\n"
-            "    cloud:  export OPENAI_API_KEY=sk-...\n"
-            "    local:  python main.py --provider ollama   (no key needed)\n"
-            f"    known providers: {', '.join(sorted(PROVIDERS))}"
-        )
-
-    return AsyncOpenAI(
-        api_key=config.api_key,
-        base_url=config.base_url,
-        timeout=config.timeout,
-        max_retries=config.max_retries,
-    )
-
-
-class LLMUnavailable(RuntimeError):
-    """Raised when the LLM half of the pipeline is not usable."""
-
-
-class LLMStageError(RuntimeError):
-    """Raised when a single stage fails. Never fatal to the BLE session."""
-
-
-# ---------------------------------------------------------------------------
-# Model discovery
-# ---------------------------------------------------------------------------
-
-async def list_available_models(config: LLMConfig, client=None) -> list[str]:
-    """
-    Ask the endpoint which models it serves, via the standard ``GET /models``.
-
-    Works against any OpenAI-compatible server: local runtimes expose only
-    the models they have pulled, so this avoids hardcoding a name that may not
-    exist on the current machine.
-    """
-    client = client or make_client(config)
-    try:
-        page = await client.models.list()
-    except Exception as exc:
-        raise LLMUnavailable(
-            f"could not list models at {config.target}: {exc}\n"
-            "    Set G1_PRIMARY_MODEL explicitly to skip discovery."
-        ) from exc
-
-    ids: list[str] = []
-    for entry in getattr(page, "data", None) or []:
-        ident = getattr(entry, "id", None) or (
-            entry.get("id") if isinstance(entry, dict) else None
-        )
-        if ident:
-            ids.append(ident)
-    return ids
-
-
-async def ensure_models(config: LLMConfig, client=None) -> LLMConfig:
-    """
-    Fill in any missing model name by discovering what the server has.
-
-    Local presets deliberately ship with no default model name, so a fresh
-    checkout works against whatever the user has already pulled. The choice is
-    printed rather than made silently.
-    """
-    if config.primary_model and config.compressor_model:
-        return config
-
-    available = await list_available_models(config, client)
-    if not available:
-        raise LLMUnavailable(
-            f"{config.target} reported no models.\n"
-            "    With Ollama: ollama pull qwen2.5:7b"
-        )
-
-    chosen = config.primary_model or available[0]
-    print(
-        f"[llm] {config.target} serves {len(available)} model(s); "
-        f"using {chosen!r}",
-        flush=True,
-    )
-    if len(available) > 1:
-        print(f"[llm] available: {', '.join(available)}", flush=True)
-
-    config.primary_model = chosen
-    if not config.compressor_model:
-        config.compressor_model = chosen
-    return config
-
-
-# ---------------------------------------------------------------------------
-# STAGE 1 — the primary heavy thinker
-# ---------------------------------------------------------------------------
-
-PRIMARY_SYSTEM_PROMPT = (
-    "You are a careful, knowledgeable assistant. Answer the user's question "
-    "directly and completely.\n\n"
-    "Write the answer you would normally write: reason it through, include the "
-    "specifics that matter, and explain briefly where it is genuinely subtle. "
-    "Do not compress or shorten it — a separate step handles that.\n\n"
-    "Prefer plain prose. Use a short list only when the content is genuinely "
-    "enumerable."
-)
-
-
-async def generate_primary_response(
-    user_query: str,
-    *,
-    client=None,
-    config: LLMConfig | None = None,
-) -> str:
-    """
-    STAGE 1 — produce the full, unconstrained answer.
-
-    This is the "heavy thinker": it does the actual reasoning and returns a
-    normal long-form response. Length limiting is deliberately NOT applied
-    here; that is Stage 2's job.
-
-    ``client`` is injectable so the pipeline can be unit-tested without a
-    network call (see :func:`selftest_pipeline`).
-
-    Raises :class:`LLMStageError` on any failure. Callers must treat that as
-    non-fatal for the BLE session.
-    """
-    config = config or build_llm_config()
-    query = (user_query or "").strip()
-    if not query:
-        raise LLMStageError("empty query")
-
-    client = client or make_client(config)
-
-    try:
-        text = await _chat(
-            client,
-            model=config.primary_model,
-            system=PRIMARY_SYSTEM_PROMPT,
-            user=query,
-            max_tokens=1200,
-            temperature=0.4,
-        )
-    except Exception as exc:
-        raise LLMStageError(f"stage 1 ({config.primary_model}) failed: {exc}") from exc
-
-    if not text.strip():
-        raise LLMStageError("stage 1 returned an empty response")
-    return text.strip()
-
-
-# ---------------------------------------------------------------------------
-# STAGE 2 — the waveguide micro-compressor
-# ---------------------------------------------------------------------------
-
-COMPRESSOR_SYSTEM_PROMPT = (
-    "You are the display formatting engine for a head-up display built into a "
-    "pair of smart glasses. You receive an assistant's full answer and emit ONLY "
-    "the text that will be rendered on the lenses.\n\n"
-    "HARD CONSTRAINTS — these are physical limits of the display, not style "
-    "preferences:\n"
-    "1. NEVER exceed 25 words. This is a hard cap; going over is a failure.\n"
-    "2. Aim for 20-25 words. If your first draft is shorter, add the next most "
-    "important concrete detail (a number, a name, a mechanism) rather than "
-    "padding.\n"
-    "3. No preamble, no greeting, no sign-off, no restating the question. No "
-    "\"Sure\", no \"Here's\", no \"In summary\".\n"
-    "4. No markdown: no bullet characters, no headers, no bold or italics, no "
-    "code fences.\n"
-    "5. No emoji, no quotation marks around the whole line.\n"
-    "6. Lead with the single most important fact. Keep numbers, names, units "
-    "and error codes — they survive truncation; drop connective prose first.\n"
-    "7. Punchy and scannable, as if read in a second while walking.\n\n"
-    "Output the display text and nothing else. No preamble, no explanation of "
-    "your choices, no surrounding quotes."
-)
-
-
-async def condense_for_glasses(
-    detailed_text: str,
-    *,
-    client=None,
-    config: LLMConfig | None = None,
-) -> str:
-    """
-    STAGE 2 — compress a full answer into what fits on the waveguide.
-
-    Acts as a strict structural filter rather than a summariser: the model is
-    told the display's hard limits and expected to obey them. Its output is
-    then passed through :func:`enforce_word_budget`, because a word count that
-    maps to a physical constraint is not something to take on faith.
-
-    Raises :class:`LLMStageError` on failure.
-    """
-    config = config or build_llm_config()
-    source = (detailed_text or "").strip()
-    if not source:
-        raise LLMStageError("nothing to condense")
-
-    client = client or make_client(config)
-
-    try:
-        text = await _chat(
-            client,
-            model=config.compressor_model,
-            system=COMPRESSOR_SYSTEM_PROMPT,
-            user=(
-                "Compress this answer into the glasses display format.\n\n"
-                f"<answer>\n{source}\n</answer>"
-            ),
-            # Cap generation so the model cannot even produce a long answer.
-            max_tokens=120,
-            temperature=0.2,
-        )
-    except Exception as exc:
-        raise LLMStageError(
-            f"stage 2 ({config.compressor_model}) failed: {exc}"
-        ) from exc
-
-    if not text.strip():
-        raise LLMStageError("stage 2 returned an empty response")
-
-    return enforce_word_budget(text, config.max_display_words)
-
-
-# ---------------------------------------------------------------------------
-# Display post-processing (deterministic; never trust the model on the limit)
-# ---------------------------------------------------------------------------
-
-# Zero-width / decorative symbols the lens cannot render.
-_EMOJI_RE = re.compile(
-    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF←-⇿⬀-⯿️]+"
-)
-_MD_RE = re.compile(r"[*_`#>|~]+")
-_BULLET_RE = re.compile(r"^\s*[-–—•*+]\s+", re.MULTILINE)
-_NUMBERED_RE = re.compile(r"^\s*\d{1,2}[.)]\s+", re.MULTILINE)
-_PREAMBLE_RE = re.compile(
-    r"^\s*(sure|certainly|of course|absolutely|okay|ok|here(?:'s| is)|"
-    r"in summary|summary|to summarize|compressed:?|display text:?)\b[,:!\-—\s]*",
-    re.IGNORECASE,
-)
-_WHITESPACE_RE = re.compile(r"\s+")
-
-
-def strip_display_noise(text: str) -> str:
-    """
-    Remove characters and scaffolding the waveguide cannot render.
-
-    Deliberately conservative: it only strips things that are guaranteed not
-    to carry meaning (markdown, bullets, emoji, decorative quotes) plus a
-    short list of filler prefixes. It never rewrites words.
-    """
-    if not text:
-        return ""
-
-    cleaned = text.replace("“", '"').replace("”", '"')
-    cleaned = cleaned.replace("‘", "'").replace("’", "'")
-    cleaned = _MD_RE.sub("", cleaned)
-    cleaned = _BULLET_RE.sub("", cleaned)
-    cleaned = _NUMBERED_RE.sub("", cleaned)
-    cleaned = _EMOJI_RE.sub("", cleaned)
-    # Models stack filler ("Sure, here's ..."), so strip repeatedly. Bounded
-    # so a legitimate word that merely starts with "ok" cannot loop forever.
-    for _ in range(3):
-        stripped = _PREAMBLE_RE.sub("", cleaned)
-        if stripped == cleaned:
-            break
-        cleaned = stripped
-    # Strip wrapping quotes the model may add around the whole line.
-    cleaned = cleaned.strip().strip('"').strip("'").strip()
-    # Newlines collapse to spaces: the driver re-wraps for the display, and a
-    # single-line fragment is what the lenses actually show.
-    cleaned = _WHITESPACE_RE.sub(" ", cleaned)
-    return cleaned.strip()
-
-
-def enforce_word_budget(text: str, max_words: int) -> str:
-    """
-    Guarantee the final payload fits the display.
-
-    The compressor is instructed to stay within budget, but a model that
-    overruns must not be able to overflow the lenses, so the limit is applied
-    here unconditionally as a hard backstop.
-    """
-    cleaned = strip_display_noise(text)
-    if not cleaned:
-        return ""
-
-    words = cleaned.split()
-    if len(words) <= max_words:
-        return cleaned
-
-    truncated = " ".join(words[:max_words]).rstrip(",;:-—")
-    return truncated + "…"
-
-
-# ---------------------------------------------------------------------------
-# LLM transport helper
-# ---------------------------------------------------------------------------
-
-async def _chat(
-    client,
-    *,
-    model: str,
-    system: str,
-    user: str,
-    max_tokens: int,
-    temperature: float,
-) -> str:
-    """
-    One Chat Completions round-trip.
-
-    Uses ``max_completion_tokens`` first and falls back to the older
-    ``max_tokens`` parameter, because a number of local OpenAI-compatible
-    servers only accept the legacy name.
-    """
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_completion_tokens=max_tokens,
-        )
-    except Exception as exc:
-        # Legacy-parameter fallback for servers without max_completion_tokens.
-        if "max_completion_tokens" not in str(exc):
-            raise
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        return ""
-    return getattr(choices[0].message, "content", "") or ""
-
-
-# ---------------------------------------------------------------------------
-# The handoff: query -> stage 1 -> stage 2 -> BLE write
-# ---------------------------------------------------------------------------
-
-@dataclass
-class PipelineResult:
-    """Outcome of one full run through both stages."""
-
-    query: str
-    stage1: str | None
-    stage2: str | None
-    display_text: str
-    stage1_error: str | None = None
-    stage2_error: str | None = None
-
-
-async def run_pipeline(
-    query: str,
-    controller: EvenG1Controller,
-    *,
-    client=None,
-    config: LLMConfig | None = None,
-    chars_per_line: int = 24,
-    clear_first: bool = False,
-    require_ack: bool = False,
-    response_mode: bool | None = None,
-) -> PipelineResult:
-    """
-    THE HANDOFF.
-
-        query ──> [Stage 1] ──> [Stage 2] ──> [BLE 0x4E write]
-                  heavy answer   <=25 words    both arms
-
-    Every failure mode here is contained. An LLM error degrades to a fallback
-    string that is still rendered on the glasses, and a BLE error propagates
-    to the caller (which owns the session). The controller's heartbeat task is
-    an independent asyncio task, so a slow LLM call of any length never
-    starves the link — the G1's ~32s idle timeout is satisfied throughout.
-    """
-    config = config or build_llm_config()
-    client = client or make_client(config)
-    config = await ensure_models(config, client)
-
-    result = PipelineResult(query=query, stage1=None, stage2=None, display_text="")
-
-    # --- Stage 1: heavy reasoning ------------------------------------------
-    print("[1/2] thinking ...", flush=True)
-    try:
-        result.stage1 = await generate_primary_response(
-            query, client=client, config=config
-        )
-        print(f"      {word_count(result.stage1)} words", flush=True)
-    except LLMStageError as exc:
-        result.stage1_error = str(exc)
-        print(f"      stage 1 FAILED: {exc}", flush=True)
-
-    # --- Stage 2: waveguide compression ------------------------------------
-    if result.stage1:
-        print("[2/2] condensing for waveguide ...", flush=True)
-        try:
-            result.stage2 = await condense_for_glasses(
-                result.stage1, client=client, config=config
-            )
-            print(f"      {word_count(result.stage2)} words", flush=True)
-        except LLMStageError as exc:
-            result.stage2_error = str(exc)
-            print(f"      stage 2 FAILED: {exc}", flush=True)
-
-    # --- Fallback selection ------------------------------------------------
-    # Prefer the compressor's output; fall back to a deterministic local
-    # truncation of stage 1; finally surface a static error line. The glasses
-    # always get *something*, and the BLE session is never torn down because
-    # an API call failed.
-    if result.stage2:
-        result.display_text = result.stage2
-    elif result.stage1:
-        result.display_text = enforce_word_budget(result.stage1, config.max_display_words)
-        print("      (using locally truncated stage 1 — compressor unavailable)")
-    else:
-        result.display_text = f"LLM error. {enforce_word_budget(_first_clause(result.stage1_error or 'no response'), 20)}"
-        print("      (no LLM output available)")
-
-    if not result.display_text.strip():
-        result.display_text = "No response."
-
-    # --- BLE write: the final handoff --------------------------------------
-    # This is the only part that touches the radio. It runs last so that a
-    # slow or failing LLM never delays or interrupts the link.
-    print(f"[ble] writing {word_count(result.display_text)} words to both arms ...",
-          flush=True)
-    packets = await controller.send_text_packet(
-        result.display_text,
-        chars_per_line=chars_per_line,
-        clear_first=clear_first,
-        require_ack=require_ack,
-        response=response_mode,
-    )
-    print(f"[ble] {len(packets)} packet(s) written: "
-          f"{hexdump(packets[0])[:48]}...", flush=True)
-
-    return result
-
-
-def word_count(text: str | None) -> int:
-    """Whitespace-delimited word count; 0 for empty/None."""
-    return len((text or "").split())
-
-
-def _first_clause(text: str, limit: int = 60) -> str:
-    """First sentence/clause of an error string, for the fallback display."""
-    match = re.split(r"[.\n]", text.strip(), maxsplit=1)
-    first = (match[0] if match else text).strip()
-    return first[:limit]
-
-
-# ---------------------------------------------------------------------------
-# Bluetooth helpers (unchanged from the BLE-only phase)
+# Bluetooth helpers
 # ---------------------------------------------------------------------------
 
 def preflight() -> None:
@@ -809,26 +175,76 @@ async def monitor_touchbars(controller: EvenG1Controller, hold: float) -> int:
 
     while True:
         now = time.monotonic()
-        remaining = deadline - now
-        if remaining <= 0:
+        if now >= deadline:
             break
-
         if now - last_report >= 10.0:
             last_report = now
             print(
                 f"  ... {humanise_duration(now - start)} elapsed, "
-                f"{humanise_duration(remaining)} left, "
                 f"{len(controller._packet_log)} packet(s) received"
             )
-
         await asyncio.sleep(0.1)
 
-    elapsed = time.monotonic() - start
     print(
-        f"\nMonitor window closed after {humanise_duration(elapsed)}: "
+        f"\nMonitor window closed after {humanise_duration(time.monotonic() - start)}: "
         f"{len(controller._packet_log)} packet(s) received."
     )
     return len(controller._packet_log)
+
+
+# ---------------------------------------------------------------------------
+# Wiring: controller -> session
+# ---------------------------------------------------------------------------
+
+def build_sender(
+    controller: EvenG1Controller,
+    args: argparse.Namespace,
+):
+    """
+    Build the async ``send`` callback the session renders through.
+
+    An empty string means "clear the display", which is the 0x18 command
+    rather than an empty 0x4E packet.
+    """
+
+    async def send(text: str) -> None:
+        if text:
+            await controller.send_text_packet(
+                text,
+                chars_per_line=args.chars_per_line,
+                clear_first=args.clear,
+                require_ack=args.require_ack,
+                response=args.response_mode,
+            )
+        else:
+            await controller.send_raw(bytes([0x18]))  # clear screen
+
+    return send
+
+
+def build_session(
+    controller: EvenG1Controller,
+    args: argparse.Namespace,
+    config: LLMConfig,
+) -> Session:
+    """
+    Assemble a Session and connect it to the live TouchBar stream.
+
+    TouchBar actions are scheduled off the notification path, so an LLM call
+    never blocks the BLE callback or the heartbeat.
+    """
+    store = FeedbackStore(args.store)
+    session = Session(
+        send=build_sender(controller, args),
+        store=store,
+        config=config,
+    )
+
+    def on_packet(side: str, data: bytes) -> None:
+        session.handle_touch(side, data)
+
+    controller.add_listener(on_packet)
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -838,15 +254,20 @@ async def monitor_touchbars(controller: EvenG1Controller, hold: float) -> int:
 REPL_HELP = """
 Commands:
   <any text>        run the two-stage pipeline and mirror it to the glasses
-  :text <literal>   send literal text to the glasses, bypassing the LLM
+  :more             drill down on the current card (same as a single tap)
+  :dismiss          back out one level / clear (same as a double tap)
+  :confirm          mark the current summary as good
+  :star             mark the current topic as important
+  :text <literal>   send literal text, bypassing the LLM
   :stage1 <query>   run only stage 1 and print the full answer (no BLE write)
   :battery          query both arms for battery level
-  :stats            packet tally for this session
+  :stats            packet tally plus session counters
+  :prefs            what the feedback loop has learned so far
   :config           show the active LLM configuration
   :help             this message
   :quit             disconnect and exit
 
-TouchBar packets are printed as they arrive, interleaved with the prompt.
+TouchBar packets print as they arrive, interleaved with the prompt.
 """.strip()
 
 
@@ -854,10 +275,10 @@ async def prompt_user(message: str) -> str:
     """
     Read one line without blocking the event loop.
 
-    ``input()`` is moved onto a worker thread so the loop keeps running: the
-    heartbeat task keeps the G1 link alive and incoming TouchBar
-    notifications keep printing while the user is thinking. Calling ``input()``
-    directly would freeze the whole session for as long as the user waits.
+    ``input()`` runs on a worker thread so the loop keeps servicing the
+    heartbeat and incoming TouchBar notifications while the user thinks.
+    Calling it directly would freeze the session, and a frozen loop stops the
+    heartbeat — the G1 drops the link after ~32s idle.
     """
     return await asyncio.to_thread(input, message)
 
@@ -865,22 +286,25 @@ async def prompt_user(message: str) -> str:
 async def repl(
     controller: EvenG1Controller,
     args: argparse.Namespace,
-    *,
-    config: LLMConfig | None = None,
-) -> int:
-    """
-    Interactive query loop.
+    config: LLMConfig,
+) -> Session:
+    """Interactive query loop. The BLE connection stays open throughout."""
+    session = build_session(controller, args, config)
 
-    The BLE connection stays open for the whole session; queries are handled
-    one at a time and each failure is contained so the session survives.
-    """
-    config = config or build_llm_config()
-    turns = 0
-
-    print("\n" + "=" * 66)
+    print("\n" + "=" * 68)
     print("G1 interactive session — type a question, or :help")
     print(f"LLM: {describe_llm_config(config)}")
-    print("=" * 66)
+    print(f"Display budget: {config.max_display_chars} chars "
+          f"(~{config.max_display_words} words, {DISPLAY_LINES} lines)")
+    if config.max_display_chars:
+        try:
+            client = make_client(config)
+            await ensure_models(config, client)
+            session.config = config
+        except LLMUnavailable as exc:
+            print(f"  ! LLM not ready: {exc}")
+            print("    The glasses stay connected; :text still works.")
+    print("=" * 68)
 
     while True:
         try:
@@ -893,6 +317,7 @@ async def repl(
         if not line:
             continue
 
+        # -- commands ------------------------------------------------------
         if line.startswith(":"):
             command, _, rest = line[1:].partition(" ")
             command = command.lower()
@@ -905,10 +330,16 @@ async def repl(
                 print(REPL_HELP)
                 continue
             if command == "config":
-                print(describe_llm_config(config))
+                print(describe_llm_config(session.config))
                 continue
             if command == "stats":
                 summarise_packets(controller)
+                print(f"  session: {session.summary()}")
+                continue
+            if command == "prefs":
+                learned = session.preferences()
+                print(learned if learned else
+                      "  nothing learned yet — a few reactions are needed.")
                 continue
             if command == "battery":
                 try:
@@ -916,18 +347,39 @@ async def repl(
                 except BleakError as exc:
                     print(f"\nBLE error: {exc}")
                 continue
+            if command == "more":
+                try:
+                    card = await session.more()
+                    if card is None:
+                        print("  nothing to expand.")
+                    else:
+                        print(f"\n>>> waveguide: {card.card.summary}")
+                except (LLMUnavailable, LLMStageError) as exc:
+                    print(f"\nexpand failed: {exc}")
+                continue
+            if command == "dismiss":
+                card = await session.dismiss()
+                print("  dismissed." if card is None
+                      else f"\n>>> back to: {card.card.summary}")
+                continue
+            if command in ("confirm", "star"):
+                ok = (await session.confirm() if command == "confirm"
+                      else await session.star())
+                print("  recorded." if ok else "  no card showing.")
+                continue
             if command == "stage1":
                 if not rest:
                     print("  usage: :stage1 <query>")
                     continue
                 print("\n[1/2] thinking ...", flush=True)
                 try:
-                    client = make_client(config)
-                    config = await ensure_models(config, client)
+                    client = make_client(session.config)
+                    session.config = await ensure_models(session.config, client)
                     answer = await generate_primary_response(
-                        rest, client=client, config=config
+                        rest, client=client, config=session.config
                     )
-                    print(f"\n--- stage 1 ({word_count(answer)} words) ---\n{answer}\n")
+                    print(f"\n--- stage 1 ({word_count(answer)} words) ---\n"
+                          f"{answer}\n")
                 except LLMUnavailable as exc:
                     print(f"\nLLM not configured: {exc}")
                 except LLMStageError as exc:
@@ -938,12 +390,7 @@ async def repl(
                     print("  usage: :text <literal>")
                     continue
                 try:
-                    await controller.send_text_packet(
-                        rest,
-                        chars_per_line=args.chars_per_line,
-                        clear_first=args.clear,
-                        response=args.response_mode,
-                    )
+                    await build_sender(controller, args)(rest)
                     print(f"  sent {word_count(rest)} words")
                 except BleakError as exc:
                     print(f"  BLE error: {exc}")
@@ -952,36 +399,23 @@ async def repl(
             print(f"  unknown command ':{command}' — try :help")
             continue
 
-        # --- normal query: the full pipeline -------------------------------
-        turns += 1
-        started = time.monotonic()
+        # -- a real question: the full pipeline ------------------------------
         try:
-            result = await run_pipeline(
-                line,
-                controller,
-                config=config,
-                chars_per_line=args.chars_per_line,
-                clear_first=args.clear,
-                require_ack=args.require_ack,
-                response_mode=args.response_mode,
-            )
-            print(f"\n>>> waveguide: {result.display_text}")
-            print(
-                f"    ({humanise_duration(time.monotonic() - started)}, "
-                f"{word_count(result.display_text)} words on display)"
-            )
+            card = await session.ask(line)
+            print(f"\n>>> waveguide: {card.card.summary}")
+            print(f"    ({word_count(card.card.summary)} words, "
+                  f"{fits_display(card.card.summary, chars_per_line=args.chars_per_line)} "
+                  f"lines) — tap for more, double-tap to dismiss")
         except LLMUnavailable as exc:
-            # Cannot even build a client. Not fatal — keep the BLE session up
-            # so the user can still use :text and watch TouchBar packets.
             print(f"\nLLM unavailable: {exc}")
-            print("    The glasses stay connected. Use :text to send literal text.")
+            print("    Glasses stay connected. Use :text to send literal text.")
         except LLMStageError as exc:
             print(f"\nstage error: {exc}")
         except BleakError as exc:
             print(f"\nBLE error: {exc}")
-            print("    The session is still up — try :quit and reconnect.")
+            print("    Session still up — :quit and reconnect if it persists.")
 
-    return turns
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +423,28 @@ async def repl(
 # ---------------------------------------------------------------------------
 
 async def run(args: argparse.Namespace) -> int:
-    # -- list-models short-circuits before touching the radio --------------
+    # -- discovery-only commands, before touching the radio ----------------
+    if args.list_providers:
+        print("Provider presets (all speak the OpenAI Chat Completions API):\n")
+        for name in sorted(PROVIDERS):
+            p = PROVIDERS[name]
+            key = " (no key needed)" if p.local else f" key: {p.key_env[0]}"
+            url = p.base_url or "default OpenAI endpoint"
+            print(f"  {name:<11} {url}{key}")
+            primary = p.default_primary or "(auto-discovered)"
+            comp = p.default_compressor or "(auto-discovered)"
+            print(f"  {'':<11} stage1={primary}  stage2={comp}")
+        print(
+            "\nAny other OpenAI-compatible server works via:\n"
+            "  export OPENAI_BASE_URL=http://host:port/v1\n"
+            "  export OPENAI_API_KEY=anything\n"
+            "  export OPENAI_MODEL=<model-name>\n"
+            "\nOverrides always win over presets: OPENAI_BASE_URL,\n"
+            "G1_PRIMARY_MODEL, G1_COMPRESSOR_MODEL, G1_LLM_TIMEOUT,\n"
+            "G1_LLM_RETRIES, G1_MAX_DISPLAY_WORDS, G1_MAX_DISPLAY_CHARS."
+        )
+        return 0
+
     if args.list_models:
         config = build_llm_config(args.provider)
         try:
@@ -1003,11 +458,12 @@ async def run(args: argparse.Namespace) -> int:
             print(f"  {name}")
         return 0
 
-    # -- llm-check short-circuits before touching the radio -----------------
     if args.llm_check:
         config = build_llm_config(args.provider)
         if args.max_display_words:
             config.max_display_words = args.max_display_words
+        if args.max_display_chars:
+            config.max_display_chars = args.max_display_chars
         print(f"LLM config: {describe_llm_config(config)}")
         try:
             client = make_client(config)
@@ -1025,17 +481,22 @@ async def run(args: argparse.Namespace) -> int:
             sys.stdout.flush()
             print(f"\nprobe failed: {exc}", file=sys.stderr)
             return 1
-        print(f"probe ok -> {probe!r} ({word_count(probe)} words)")
+        print(f"probe ok -> {probe!r} "
+              f"({word_count(probe)} words, {len(probe)} chars, "
+              f"{fits_display(probe)} lines)")
         return 0
 
     preflight()
 
     config = build_llm_config(args.provider)
-    # An explicit flag overrides the environment value.
     if args.max_display_words:
         config.max_display_words = args.max_display_words
+    if args.max_display_chars:
+        config.max_display_chars = args.max_display_chars
     if not args.no_text:
         print(f"LLM: {describe_llm_config(config)}")
+    print(f"Display budget: {config.max_display_chars} chars / "
+          f"{config.max_display_words} words / {DISPLAY_LINES} lines")
 
     controller = EvenG1Controller(
         scan_timeout=args.scan_timeout,
@@ -1045,23 +506,22 @@ async def run(args: argparse.Namespace) -> int:
 
     print(f"\nScanning for G1 arms for {args.scan_timeout:.0f}s ...")
     exit_code = 0
+    session: Session | None = None
 
     try:
         if args.scan_only:
-            result_scan = await controller.discover(
+            found = await controller.discover(
                 timeout=args.scan_timeout,
                 require_both_arms=not args.allow_single_arm,
             )
-            print(f"\n{result_scan.describe()}  (in {result_scan.elapsed:.1f}s)")
-            for identity in result_scan.identities.values():
+            print(f"\n{found.describe()}  (in {found.elapsed:.1f}s)")
+            for identity in found.identities.values():
                 print(f"  {identity.label}")
-            for identity in result_scan.nus_only:
+            for identity in found.nus_only:
                 print(f"  [nus-only, not claimed as G1] {identity.label}")
-            if not result_scan.channels:
-                print(
-                    "\nNothing matched. Confirm the glasses are powered on and "
-                    "not bonded to the Even Realities app."
-                )
+            if not found.channels:
+                print("\nNothing matched. Confirm the glasses are powered on "
+                      "and not bonded to the Even Realities app.")
                 return 1
             return 0
 
@@ -1073,44 +533,35 @@ async def run(args: argparse.Namespace) -> int:
         print(f"  {result.describe()}")
 
         for arm in controller.arms:
-            print(
-                f"  {arm.identity.side} arm {arm.identity.address} "
-                f"connected, MTU={arm.mtu}"
-            )
+            print(f"  {arm.identity.side} arm {arm.identity.address} "
+                  f"connected, MTU={arm.mtu}")
 
         if len(controller.arms) < 2:
-            print(
-                "\n  ! Connected to only one arm. Text will appear on that side "
-                "only.\n    Re-run with the other arm awake and unpaired."
-            )
+            print("\n  ! Connected to only one arm. Text will appear on that "
+                  "side only.\n    Re-run with the other arm awake and unpaired.")
 
         if args.dump_services:
             controller.dump_services()
-
         if args.battery:
-            levels = await controller.query_battery()
-            print(f"\nBattery: {levels}")
+            print(f"\nBattery: {await controller.query_battery()}")
 
-        # -- single query mode: --ask "..." ---------------------------------
+        # -- one query -------------------------------------------------------
         if args.ask:
             print(f"\nQuery: {args.ask}")
             try:
-                outcome = await run_pipeline(
-                    args.ask,
-                    controller,
-                    config=config,
-                    chars_per_line=args.chars_per_line,
-                    clear_first=args.clear,
-                    require_ack=args.require_ack,
-                    response_mode=args.response_mode,
+                outcome = await run_query(
+                    args.ask, build_sender(controller, args), config=config
                 )
                 print(f"\n>>> waveguide: {outcome.display_text}")
+                print(f"    ({word_count(outcome.display_text)} words, "
+                      f"{fits_display(outcome.display_text)} lines)")
             except LLMUnavailable as exc:
+                sys.stdout.flush()
                 print(f"\nLLM unavailable: {exc}", file=sys.stderr)
                 exit_code = 2
             return exit_code
 
-        # -- literal text mode: --text / --no-text --------------------------
+        # -- literal text ----------------------------------------------------
         if args.text and not args.no_text:
             print(f"\nSending: {args.text!r}")
             packets = await controller.send_text_packet(
@@ -1125,9 +576,11 @@ async def run(args: argparse.Namespace) -> int:
                 for index, packet in enumerate(packets):
                     print(f"    [{index}] {hexdump(packet)}")
 
-        # -- interactive session ---------------------------------------------
+        # -- interactive -----------------------------------------------------
         if args.interactive or (sys.stdin.isatty() and not args.one_shot):
-            await repl(controller, args, config=config)
+            session = await repl(controller, args, config)
+            if session.stats.turns or session.stats.expansions:
+                print(f"\n  {session.summary()}")
         elif args.hold > 0:
             await monitor_touchbars(controller, args.hold)
             summarise_packets(controller)
@@ -1141,188 +594,15 @@ async def run(args: argparse.Namespace) -> int:
     except asyncio.CancelledError:
         print("\ncancelled — shutting down")
     finally:
-        # Always tear the link down, even on failure, so BlueZ releases the
-        # adapter and the next run can reconnect immediately.
+        # Always release the adapter so the next run can reconnect at once.
         with contextlib.suppress(Exception):
             await asyncio.wait_for(controller.disconnect(), timeout=10.0)
 
-    if exit_code == 0 and controller._packet_log and not args.interactive:
+    if exit_code == 0 and controller._packet_log and session is None:
         summarise_packets(controller)
 
     print("done.")
     return exit_code
-
-
-# ---------------------------------------------------------------------------
-# Offline self-test (no radio, no API key, no network)
-# ---------------------------------------------------------------------------
-
-class _FakeMessage:
-    def __init__(self, content: str) -> None:
-        self.content = content
-
-
-class _FakeChoice:
-    def __init__(self, content: str) -> None:
-        self.message = _FakeMessage(content)
-
-
-class _FakeResponse:
-    def __init__(self, content: str) -> None:
-        self.choices = [_FakeChoice(content)]
-
-
-class _FakeCompletions:
-    """Minimal stand-in for ``client.chat.completions``."""
-
-    def __init__(self, replies: list[str], *, fail_at: int | None = None) -> None:
-        self.replies = replies
-        self.fail_at = fail_at
-        self.calls: list[dict] = []
-
-    async def create(self, *, model, messages, **kwargs):
-        index = len(self.calls)
-        self.calls.append({"model": model, "messages": messages, **kwargs})
-        if self.fail_at is not None and index == self.fail_at:
-            raise RuntimeError("simulated upstream failure")
-        return _FakeResponse(self.replies[index] if index < len(self.replies) else "")
-
-
-class _FakeClient:
-    def __init__(self, replies: list[str], *, fail_at: int | None = None) -> None:
-        self.completions = _FakeCompletions(replies, fail_at=fail_at)
-        self.chat = type("_Chat", (), {"completions": self.completions})()
-
-
-def _test_config() -> LLMConfig:
-    return LLMConfig(
-        api_key="test",
-        base_url="http://localhost:11434/v1",
-        primary_model="test-primary",
-        compressor_model="test-compressor",
-        timeout=5.0,
-        max_retries=0,
-        max_display_words=DEFAULT_MAX_DISPLAY_WORDS,
-    )
-
-
-async def _async_checks() -> list[str]:
-    """Async portion of the self-test. Returns a list of failure labels."""
-    failures: list[str] = []
-
-    def check(label: str, actual, expected) -> None:
-        if actual == expected:
-            print(f"  ok   {label}")
-        else:
-            print(
-                f"  FAIL {label}\n"
-                f"         expected {expected!r}\n"
-                f"         actual   {actual!r}"
-            )
-            failures.append(label)
-
-    config = _test_config()
-
-    print("\ntwo-stage handoff")
-    fake = _FakeClient([
-        "A long, detailed answer about Rayleigh scattering and wavelength. " * 3,
-        "Sky is blue because shorter wavelengths scatter more than longer ones.",
-    ])
-    stage1 = await generate_primary_response("why is the sky blue", client=fake, config=config)
-    check("stage 1 is unconstrained", word_count(stage1) > 25, True)
-    check("stage 1 used the primary model", fake.completions.calls[0]["model"], "test-primary")
-
-    stage2 = await condense_for_glasses(stage1, client=fake, config=config)
-    check("stage 2 used the compressor model", fake.completions.calls[1]["model"], "test-compressor")
-    check("stage 2 within budget", word_count(stage2) <= 25, True)
-
-    stage2_messages = fake.completions.calls[1]["messages"]
-    check(
-        "stage 2 receives the stage 1 text",
-        stage1[:40] in stage2_messages[1]["content"],
-        True,
-    )
-    check(
-        "stage 2 system prompt is the HUD prompt",
-        "head-up display" in stage2_messages[0]["content"],
-        True,
-    )
-
-    print("\nstage failure containment")
-    # A stage-1 failure means the very first call raises (index 0).
-    boom = _FakeClient(["x"], fail_at=0)
-    try:
-        await generate_primary_response("q", client=boom, config=config)
-        check("stage 1 failure raises LLMStageError", False, True)
-    except LLMStageError:
-        check("stage 1 failure raises LLMStageError", True, True)
-
-    # Stage 2 dies -> stage 1 output must still be usable locally.
-    half = _FakeClient(["Full answer text that is quite long and detailed here."], fail_at=1)
-    got1 = await generate_primary_response("q", client=half, config=config)
-    try:
-        await condense_for_glasses(got1, client=half, config=config)
-        check("stage 2 failure raises LLMStageError", False, True)
-    except LLMStageError:
-        check("stage 2 failure raises LLMStageError", True, True)
-    fallback = enforce_word_budget(got1, config.max_display_words)
-    check("local fallback is non-empty", bool(fallback.strip()), True)
-    check("local fallback within budget", word_count(fallback) <= 25, True)
-
-    return failures
-
-
-def selftest_pipeline() -> int:
-    """
-    Verify both the BLE packet format and the LLM pipeline offline.
-
-    Run with ``python main.py --selftest``. Uses a fake LLM client, so no API
-    key and no network access are required.
-    """
-    print("BLE packet format")
-    ble_status = selftest()
-
-    print("\ndisplay post-processing")
-    failures: list[str] = []
-
-    def check(label: str, actual, expected) -> None:
-        if actual == expected:
-            print(f"  ok   {label}")
-        else:
-            print(
-                f"  FAIL {label}\n"
-                f"         expected {expected!r}\n"
-                f"         actual   {actual!r}"
-            )
-            failures.append(label)
-
-    check("strips markdown", strip_display_noise("**bold** text"), "bold text")
-    check("strips bullets", strip_display_noise("- first\n- second"), "first second")
-    check("strips emoji", strip_display_noise("hello \U0001F600 world"), "hello world")
-    check(
-        "strips stacked preamble",
-        strip_display_noise("Sure, here's the thing"),
-        "the thing",
-    )
-    check("strips wrapping quotes", strip_display_noise('"quoted"'), "quoted")
-
-    long_text = " ".join(f"word{i}" for i in range(60))
-    trimmed = enforce_word_budget(long_text, 25)
-    check("enforces word limit", word_count(trimmed) <= 25, True)
-    check("marks truncation", trimmed.endswith("…"), True)
-    check("leaves short text alone", enforce_word_budget("hi there", 25), "hi there")
-    check("handles empty input", enforce_word_budget("", 25), "")
-
-    print("\nasync pipeline checks")
-    failures.extend(asyncio.run(_async_checks()))
-
-    print()
-    total = ble_status + (1 if failures else 0)
-    if total:
-        print(f"selftest FAILED: {ble_status} BLE check(s), {len(failures)} pipeline check(s)")
-        return 1
-    print("selftest passed")
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1339,32 +619,16 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  export OPENAI_API_KEY=sk-...\n"
-            "  python main.py                       # interactive session\n"
-            "  python main.py --llm-check            # test the LLM path only\n"
+            "  python main.py                        # interactive session\n"
+            "  python main.py --provider ollama      # local model, no key\n"
+            "  python main.py --llm-check            # probe the LLM only\n"
             "  python main.py --ask 'why is the sky blue'\n"
-            "  python main.py --one-shot --text 'hello'\n\n"
-            "local model:\n"
-            "  export OPENAI_BASE_URL=http://localhost:11434/v1\n"
-            "  export OPENAI_API_KEY=ollama\n"
-            "  export OPENAI_MODEL=qwen2.5:7b\n"
-            "  export G1_COMPRESSOR_MODEL=qwen2.5:3b\n"
+            "  python main.py --one-shot --text 'hello'\n"
+            "  python main.py --prefs                # what the loop learned\n"
         ),
     )
 
     # -- pipeline ---------------------------------------------------------
-    parser.add_argument(
-        "--provider", metavar="NAME", choices=sorted(PROVIDERS),
-        help=(
-            "LLM provider preset: "
-            + ", ".join(sorted(PROVIDERS))
-            + " (default: openai, or $G1_PROVIDER)"
-        ),
-    )
-    parser.add_argument(
-        "--list-providers", action="store_true",
-        help="print the provider presets and exit",
-    )
     parser.add_argument(
         "--ask", metavar="QUERY",
         help="run one pipeline query (stage 1 -> stage 2 -> BLE) and exit",
@@ -1378,8 +642,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="never enter the REPL; send --text and exit",
     )
     parser.add_argument(
+        "--provider", metavar="NAME", choices=sorted(PROVIDERS),
+        help="provider preset: " + ", ".join(sorted(PROVIDERS)),
+    )
+    parser.add_argument(
+        "--list-providers", action="store_true",
+        help="print the provider presets and exit",
+    )
+    parser.add_argument(
         "--list-models", action="store_true",
-        help="ask the configured endpoint which models it serves, then exit",
+        help="ask the endpoint which models it serves, then exit",
     )
     parser.add_argument(
         "--llm-check", action="store_true",
@@ -1387,25 +659,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-display-words", type=int, default=DEFAULT_MAX_DISPLAY_WORDS,
+        metavar="N", help=f"word ceiling (default: {DEFAULT_MAX_DISPLAY_WORDS})",
+    )
+    parser.add_argument(
+        "--max-display-chars", type=int, default=DEFAULT_MAX_DISPLAY_CHARS,
         metavar="N",
-        help=f"hard display word limit (default: {DEFAULT_MAX_DISPLAY_WORDS})",
+        help=f"character ceiling, the one that maps to the screen "
+             f"(default: {DEFAULT_MAX_DISPLAY_CHARS} = {DISPLAY_LINES} lines "
+             f"x 24 chars)",
     )
 
     # -- payload ----------------------------------------------------------
     parser.add_argument(
         "--text", metavar="STR", nargs="?", const=DEFAULT_TEST_TEXT,
         default=DEFAULT_TEST_TEXT,
-        help=f"literal text to render, bypassing the LLM (default: {DEFAULT_TEST_TEXT!r})",
+        help=f"literal text, bypassing the LLM (default: {DEFAULT_TEST_TEXT!r})",
     )
     parser.add_argument(
         "--no-text", action="store_true",
         help="do not send the default literal text on startup",
     )
 
+    # -- session ----------------------------------------------------------
+    parser.add_argument(
+        "--store", metavar="PATH",
+        help="feedback database path "
+             "(default: ~/.local/share/g1-ble-backend/feedback.db)",
+    )
+
     # -- connection -------------------------------------------------------
     parser.add_argument(
         "--hold", type=float, default=DEFAULT_HOLD_SECONDS, metavar="SEC",
-        help=f"seconds to monitor TouchBars in non-interactive mode (default: {DEFAULT_HOLD_SECONDS:.0f})",
+        help=f"seconds to monitor TouchBars non-interactively "
+             f"(default: {DEFAULT_HOLD_SECONDS:.0f})",
     )
     parser.add_argument(
         "--scan-timeout", type=float, default=12.0, metavar="SEC",
@@ -1413,7 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--channel", metavar="XX",
-        help="pin a specific G1 channel number (e.g. 07) instead of auto-selecting",
+        help="pin a specific G1 channel (e.g. 07) instead of auto-selecting",
     )
     parser.add_argument(
         "--chars-per-line", type=int, default=24, metavar="N",
@@ -1454,18 +740,164 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--selftest", action="store_true",
-        help="run offline packet + pipeline checks and exit (no radio, no API key)",
+        help="run offline packet + pipeline checks (no radio, no API key)",
     )
     parser.add_argument(
-        "--quiet", action="store_true",
-        help="suppress per-packet RX lines",
+        "--quiet", action="store_true", help="suppress per-packet RX lines",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
-        help="enable debug logging, including BLE writes and MTU negotiation",
+        help="debug logging, including BLE writes and MTU negotiation",
     )
-
     return parser
+
+
+# ---------------------------------------------------------------------------
+# Offline self-test
+# ---------------------------------------------------------------------------
+
+class _FakeMessage:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _FakeMessage(content)
+
+
+class _FakeResponse:
+    def __init__(self, content: str) -> None:
+        self.choices = [_FakeChoice(content)]
+
+
+class _FakeCompletions:
+    def __init__(self, replies: list[str], *, fail_at: int | None = None) -> None:
+        self.replies = replies
+        self.fail_at = fail_at
+        self.calls: list[dict] = []
+
+    async def create(self, *, model, messages, **kwargs):
+        index = len(self.calls)
+        self.calls.append({"model": model, "messages": messages, **kwargs})
+        if self.fail_at is not None and index == self.fail_at:
+            raise RuntimeError("simulated upstream failure")
+        return _FakeResponse(self.replies[index] if index < len(self.replies) else "")
+
+
+class _FakeClient:
+    def __init__(self, replies: list[str], *, fail_at: int | None = None) -> None:
+        self.completions = _FakeCompletions(replies, fail_at=fail_at)
+        self.chat = type("_Chat", (), {"completions": self.completions})()
+
+
+def selftest() -> int:
+    """Verify the BLE packet format and the LLM pipeline offline."""
+    import asyncio
+
+    from g1_driver import selftest as ble_selftest
+
+    failures: list[str] = []
+
+    def check(label: str, actual, expected) -> None:
+        if actual == expected:
+            print(f"  ok   {label}")
+        else:
+            print(f"  FAIL {label}\n         expected {expected!r}\n"
+                  f"         actual   {actual!r}")
+            failures.append(label)
+
+    print("BLE packet format")
+    ble_status = ble_selftest()
+
+    print("\ndisplay post-processing")
+    check("strips markdown", strip_display_noise("**bold** text"), "bold text")
+    check("strips bullets", strip_display_noise("- first\n- second"), "first second")
+    check("strips emoji", strip_display_noise("hello \U0001F600 world"), "hello world")
+    check("strips stacked preamble",
+          strip_display_noise("Sure, here's the thing"), "the thing")
+    check("strips wrapping quotes", strip_display_noise('"quoted"'), "quoted")
+
+    print("\ndisplay budget (character ceiling is what fits the screen)")
+    long_text = " ".join(f"word{i}" for i in range(60))
+    trimmed = enforce_display_budget(long_text)
+    check("respects character ceiling", len(trimmed) <= DEFAULT_MAX_DISPLAY_CHARS, True)
+    check("respects word ceiling", word_count(trimmed) <= DEFAULT_MAX_DISPLAY_WORDS, True)
+    check("marks truncation", trimmed.endswith("…"), True)
+    check("short text untouched", enforce_display_budget("hi there"), "hi there")
+    check("empty input", enforce_display_budget(""), "")
+
+    # The bug this fixes: 25 words used to render as 9 lines on a 5-line screen.
+    twentyfive = " ".join(["example"] * 25)
+    check("25 words now fits the screen",
+          fits_display(enforce_display_budget(twentyfive, max_words=25)) <= DISPLAY_LINES,
+          True)
+    check("line count is derived from characters",
+          fits_display("a" * 120), 5)
+    check("long single word still sent",
+          len(enforce_display_budget("x" * 400)) > 0, True)
+
+    print("\nasync pipeline checks")
+
+    async def async_checks() -> None:
+        config = build_llm_config("custom")
+        config.api_key = "test"
+        config.primary_model = "test-primary"
+        config.compressor_model = "test-compressor"
+
+        fake = _FakeClient([
+            "A long detailed answer about Rayleigh scattering, wavelength "
+            "dependence and atmospheric optical depth, with enough words to "
+            "clearly exceed the display ceiling. " * 2,
+            "Sky is blue because shorter wavelengths scatter more than longer ones.",
+        ])
+        s1 = await generate_primary_response("why", client=fake, config=config)
+        check("stage 1 unconstrained", word_count(s1) > 25, True)
+        s2 = await condense_for_glasses(s1, client=fake, config=config)
+        check("stage 2 within char budget",
+              len(s2) <= DEFAULT_MAX_DISPLAY_CHARS, True)
+        check("stage 2 gets stage 1 text",
+              s1[:40] in fake.completions.calls[1]["messages"][1]["content"], True)
+
+        boom = _FakeClient(["x"], fail_at=0)
+        try:
+            await generate_primary_response("q", client=boom, config=config)
+            check("stage 1 failure raises", False, True)
+        except LLMStageError:
+            check("stage 1 failure raises", True, True)
+
+        written: list[str] = []
+
+        async def send(text: str) -> None:
+            written.append(text)
+
+        partial = _FakeClient(
+            ["Full answer text that is quite long and detailed here. " * 2], fail_at=1
+        )
+        got1 = await generate_primary_response("q", client=partial, config=config)
+        try:
+            await condense_for_glasses(got1, client=partial, config=config)
+            check("stage 2 failure raises", False, True)
+        except LLMStageError:
+            check("stage 2 failure raises", True, True)
+
+        from pipeline import run_query
+
+        result = await run_query("q", send, client=partial, config=config, verbose=False)
+        check("BLE still written after stage failure", len(written), 1)
+        check("fallback within char budget",
+              len(written[0]) <= DEFAULT_MAX_DISPLAY_CHARS, True)
+        check("fallback non-empty", bool(written[0].strip()), True)
+
+    asyncio.run(async_checks())
+
+    print()
+    total = ble_status + (1 if failures else 0)
+    if total:
+        print(f"selftest FAILED: {ble_status} BLE check(s), {len(failures)} pipeline check(s)")
+        return 1
+    print("selftest passed")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1480,34 +912,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.verbose:
         logging.getLogger("bleak").setLevel(logging.WARNING)
 
-    if args.list_providers:
-        print("Provider presets (all speak the OpenAI Chat Completions API):\n")
-        for name in sorted(PROVIDERS):
-            p = PROVIDERS[name]
-            key = " (no key needed)" if p.local else f" key: {p.key_env[0]}"
-            url = p.base_url or "default OpenAI endpoint"
-            print(f"  {name:<11} {url}{key}")
-            print(f"  {'':<11} stage1={p.default_primary}  stage2={p.default_compressor}")
-        print(
-            "\nAny other OpenAI-compatible server works via:\n"
-            "  export OPENAI_BASE_URL=http://host:port/v1\n"
-            "  export OPENAI_API_KEY=anything\n"
-            "  export OPENAI_MODEL=<model-name>\n"
-            "\nOverrides always win over presets:"
-            " OPENAI_BASE_URL, G1_PRIMARY_MODEL, G1_COMPRESSOR_MODEL,\n"
-            "G1_LLM_TIMEOUT, G1_LLM_RETRIES, G1_MAX_DISPLAY_WORDS."
-        )
-        return 0
-
     if args.selftest:
-        return selftest_pipeline()
+        return selftest()
 
-    # argparse's nargs="?" gives `const` for a bare `--text`, but no default,
-    # so only substitute when the flag was supplied without a value.
-    if args.text is not None and args.text == "":
-        args.text = DEFAULT_TEST_TEXT
-
-    # argparse yields a string here; the driver wants True/False/None.
     if args.response == "write":
         args.response_mode = True
     elif args.response == "no-response":
