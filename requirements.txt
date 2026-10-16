@@ -10,6 +10,12 @@
 # so the upper bound is deliberate -- g1_driver.py targets the 3.x API.
 bleak>=3.0,<4
 
+# LLM pipeline (main.py stages 1 and 2). Optional in practice — the BLE half
+# of the tool runs without it — but required for the AI pipeline.
+# First-party OpenAI SDK. Works unchanged against any OpenAI-compatible
+# server by setting OPENAI_BASE_URL (Ollama, LM Studio, vLLM, llama.cpp).
+openai>=3.0,<4
+
 # Platform notes (installed automatically where required, pinned here for
 # reproducibility on CI images that use --no-deps):
 #   Linux / BlueZ (dbus backend)  -> dbus-fast, plus the `bluez` OS package
