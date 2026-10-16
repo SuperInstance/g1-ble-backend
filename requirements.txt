@@ -1,0 +1,18 @@
+# Even Realities G1 developer backend — runtime dependencies.
+#
+# Only one BLE dependency is used: bleak (the async cross-platform GATT client).
+# All GATT traffic goes through bleak's own programmatic API -- there are no
+# vendor SDKs, no nRF Connect dependency, and no unverified third-party
+# wrappers in this file.
+
+# Core bleak works on every platform. 3.x is the current major line; the
+# scanner callback kwarg and write() semantics changed across 1.x/2.x/3.x,
+# so the upper bound is deliberate -- g1_driver.py targets the 3.x API.
+bleak>=3.0,<4
+
+# Platform notes (installed automatically where required, pinned here for
+# reproducibility on CI images that use --no-deps):
+#   Linux / BlueZ (dbus backend)  -> dbus-fast, plus the `bluez` OS package
+#   macOS  (CoreBluetooth backend) -> bleak[core]
+#   Windows (WinRT backend)       -> bleak[core]
+# dbus-fast==5.2.0
