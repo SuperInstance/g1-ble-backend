@@ -88,8 +88,38 @@ Host: Ubuntu under WSL2, RTX 4050 Laptop (6 GB VRAM), Python 3.14.
 | ollaya | `laya:en` / `:multilingual` | 683–853 MB | |
 
 **VRAM contention:** 6 GB total. A 7B Q4 generative model (4.7 GB) and the 8 GB
-decision model cannot be resident at the same time. This constrains tiering
-more than any architectural argument.
+decision model cannot both be resident *and fast at the same time*; winnow runs
+by offloading, but whether it can share the GPU with a generator simultaneously
+is still unmeasured. This constrains deployment shape more than any
+architectural argument.
+
+### Measured discrimination of the decision model (Experiment A)
+
+40 labelled candidates, ordinal buckets (0 noise / 1 glance-worthy /
+2 interrupt), base rate 0.30. Full report:
+[`experiments/results/REPORT-A.md`](../experiments/results/REPORT-A.md),
+correction in [`REPORT-A2-ordinal.md`](../experiments/results/REPORT-A2-ordinal.md).
+
+| metric | value |
+|---|---|
+| Spearman(score, ordinal truth) | 0.737 |
+| AUC noise vs interrupt | **0.958** |
+| AUC noise vs glance | 0.839 |
+| AUC glance vs interrupt | **0.813** |
+
+Two findings that changed the design:
+
+- **The two boundaries are not equally hard.** Separating noise from genuinely
+  urgent is objective and the model does it well (AUC 0.958). Separating
+  glance-worthy from interrupt-worthy is subjective and wearer-specific
+  (AUC 0.813 zero-shot). These should not share one gate.
+- **A clock feature does not help.** The hypothesis that bucket confusion came
+  from the model lacking "now" was tested and **falsified**: every combination
+  including multiplicative veto rules gave zero precision gain. The residual
+  errors contain no deadlines at all.
+
+The model is **not** fooled by tone or punctuation, which was the failure mode
+most expected. Loud-and-empty scored 0.70; quiet-and-urgent scored 1.73.
 
 ### `winnow:e4b` — verified decision output
 
@@ -104,7 +134,14 @@ Never generates text; reads answer-label logits. Real run, `router` preset:
 "is_sensitive":{ "type": "noul",   "noul": 0.0477 }
 ```
 
-Latency: ~22 ms for one warm decision on a short state.
+Latency: **19.1 s cold, ~145 ms warm** (median over 40 calls, measured in
+`experiments/`). An earlier single observation suggested ~22 ms; that figure
+was **~7x optimistic** and has been corrected.
+
+Despite being 8 GB of model on a machine with 6 GB of VRAM, `winnow:e4b`
+**does run** — it offloads. An earlier claim in this repository that it "never
+fits" was wrong and has been removed. What remains unmeasured is whether it can
+share the GPU with a 7B generator simultaneously.
 
 Note `noul` returns a **continuous value**, not a boolean, and `score` returns a
 position with a full distribution. Both are useful as *rankings*. Neither is
