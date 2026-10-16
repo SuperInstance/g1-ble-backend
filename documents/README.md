@@ -41,10 +41,23 @@ converge on the same answer:
 - The G1 is two BLE peripherals; both must be written.
 - MTU must be negotiated or notifications never arrive.
 - The link drops after ~32s without a heartbeat.
-- - `0x4E` page fields index screens, not BLE fragments.
-- The development host is WSL2: no Bluetooth without a USB passthrough dongle.
-- `winnow:e4b` is 8 GB against 6 GB of VRAM and never fully fits.
-- The laptop-in-a-backpack is not a viable all-day host.
+- `0x4E` page fields index screens, not BLE fragments.
+- `winnow` reads answer-label logits rather than generating text, and returns
+  calibrated-looking distributions (verified on a real run).
+
+**NOT settled — an earlier revision of this file wrongly listed these as
+verified. Corrected:**
+
+- *"`winnow:e4b` never fits in VRAM."* 8 GB of model against 6 GB of VRAM
+  **suggests** a problem, but what actually happens — partial offload, CPU
+  offload, or failure — was never measured. The 22 ms warm figure was one
+  observation on one short input, not a benchmark. Being measured now.
+- *"The laptop-in-a-backpack is not a viable all-day host."* Strongly argued by
+  the operational review (lid-close suspend, thermal throttling, battery) and
+  probably right, but not measured on this hardware.
+- *"The dev host is WSL2, so no Bluetooth."* The absence of `bluetoothctl` and
+  of `org.bluez` on D-Bus was observed directly, but a WSL2 USB-passthrough
+  dongle is a plausible fix and has not been tried.
 
 **Agreed across reviewers:**
 

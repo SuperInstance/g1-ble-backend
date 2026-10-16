@@ -1,0 +1,15 @@
+{
+  "worth_interrupting": {
+    "type": "score",
+    "criteria": [
+      "0: noise, never worth display attention",
+      "1: worth a glance only if he happens to look up",
+      "2: time-critical or blocking; worth interrupting"
+    ],
+    "instructions": "Score how much this message justifies breaking into Casey Miyamoto's attention while he is walking. Judge only what the text supports, not its tone. A 2 requires a concrete consequence and a deadline."
+  },
+  "exam_dependent": {
+    "type": "noul",
+    "instructions": "Is this a case where the absence of a reply will itself cause a real, concrete loss (a missed meeting, a failed deploy, an expiring credential), rather than merely being missed information?"
+  }
+}

@@ -1,0 +1,525 @@
+{
+  "model": "winnow:e4b",
+  "rows": [
+    {
+      "id": 0,
+      "text": "Build finished but nobody is blocked on it",
+      "truth": 1,
+      "score": 0.1855,
+      "confidence": 0.7322,
+      "probs": {
+        "0": 0.8214,
+        "1": 0.1716,
+        "2": 0.0069
+      },
+      "latency_s": 19.058
+    },
+    {
+      "id": 1,
+      "text": "Build 4821 finished: all 24 tests green",
+      "truth": 2,
+      "score": 0.229,
+      "confidence": 0.6754,
+      "probs": {
+        "0": 0.7836,
+        "1": 0.2038,
+        "2": 0.0126
+      },
+      "latency_s": 0.155
+    },
+    {
+      "id": 2,
+      "text": "Reminder: water plants",
+      "truth": 0,
+      "score": 0.7265,
+      "confidence": 0.5362,
+      "probs": {
+        "0": 0.2913,
+        "1": 0.6908,
+        "2": 0.0179
+      },
+      "latency_s": 0.149
+    },
+    {
+      "id": 3,
+      "text": "CI red on main: 3 failures in auth",
+      "truth": 2,
+      "score": 1.012,
+      "confidence": 0.359,
+      "probs": {
+        "0": 0.2077,
+        "1": 0.5727,
+        "2": 0.2196
+      },
+      "latency_s": 0.15
+    },
+    {
+      "id": 4,
+      "text": "npm publish finished, package is live",
+      "truth": 1,
+      "score": 0.2369,
+      "confidence": 0.6596,
+      "probs": {
+        "0": 0.7731,
+        "1": 0.2169,
+        "2": 0.01
+      },
+      "latency_s": 0.146
+    },
+    {
+      "id": 5,
+      "text": "Test failed, not on your branch, not urgent",
+      "truth": 0,
+      "score": 0.1532,
+      "confidence": 0.7779,
+      "probs": {
+        "0": 0.852,
+        "1": 0.1429,
+        "2": 0.0051
+      },
+      "latency_s": 0.146
+    },
+    {
+      "id": 6,
+      "text": "Flight UA448 boarding closes in 12 minutes",
+      "truth": 2,
+      "score": 1.9178,
+      "confidence": 0.8968,
+      "probs": {
+        "0": 0.0134,
+        "1": 0.0554,
+        "2": 0.9312
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 7,
+      "text": "LinkedIn: 7 people viewed your profile",
+      "truth": 0,
+      "score": 0.326,
+      "confidence": 0.526,
+      "probs": {
+        "0": 0.684,
+        "1": 0.306,
+        "2": 0.01
+      },
+      "latency_s": 0.147
+    },
+    {
+      "id": 8,
+      "text": "quick one: prod database is down",
+      "truth": 2,
+      "score": 1.7309,
+      "confidence": 0.6381,
+      "probs": {
+        "0": 0.0279,
+        "1": 0.2134,
+        "2": 0.7587
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 9,
+      "text": "PR comment from a bot",
+      "truth": 0,
+      "score": 0.175,
+      "confidence": 0.7499,
+      "probs": {
+        "0": 0.8333,
+        "1": 0.1585,
+        "2": 0.0083
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 10,
+      "text": "3 new mentions, all in #g1-protocol",
+      "truth": 1,
+      "score": 0.6555,
+      "confidence": 0.4491,
+      "probs": {
+        "0": 0.3559,
+        "1": 0.6328,
+        "2": 0.0114
+      },
+      "latency_s": 0.148
+    },
+    {
+      "id": 11,
+      "text": "A dependency you own was deprecated",
+      "truth": 1,
+      "score": 0.6999,
+      "confidence": 0.5123,
+      "probs": {
+        "0": 0.3126,
+        "1": 0.6749,
+        "2": 0.0125
+      },
+      "latency_s": 0.149
+    },
+    {
+      "id": 12,
+      "text": "Weekly newsletter: 47 stories you won't read",
+      "truth": 0,
+      "score": 0.2627,
+      "confidence": 0.62,
+      "probs": {
+        "0": 0.7467,
+        "1": 0.244,
+        "2": 0.0093
+      },
+      "latency_s": 0.148
+    },
+    {
+      "id": 13,
+      "text": "2 PRs waiting on your review",
+      "truth": 1,
+      "score": 0.641,
+      "confidence": 0.3958,
+      "probs": {
+        "0": 0.3809,
+        "1": 0.5972,
+        "2": 0.0219
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 14,
+      "text": "Weekly digest ready: 12 unread threads",
+      "truth": 1,
+      "score": 0.5555,
+      "confidence": 0.2917,
+      "probs": {
+        "0": 0.4583,
+        "1": 0.5278,
+        "2": 0.0138
+      },
+      "latency_s": 0.147
+    },
+    {
+      "id": 15,
+      "text": "Battery at 22%, about 4 hours left",
+      "truth": 1,
+      "score": 1.1712,
+      "confidence": 0.273,
+      "probs": {
+        "0": 0.1567,
+        "1": 0.5153,
+        "2": 0.3279
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 16,
+      "text": "minor: your access expires tomorrow morning",
+      "truth": 2,
+      "score": 1.8217,
+      "confidence": 0.7808,
+      "probs": {
+        "0": 0.0322,
+        "1": 0.1139,
+        "2": 0.8539
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 17,
+      "text": "Backlog grooming moved to 11:00",
+      "truth": 1,
+      "score": 0.9563,
+      "confidence": 0.4609,
+      "probs": {
+        "0": 0.2015,
+        "1": 0.6406,
+        "2": 0.1579
+      },
+      "latency_s": 0.148
+    },
+    {
+      "id": 18,
+      "text": "Standup moved to 09:30, you have 40 minutes",
+      "truth": 2,
+      "score": 1.4301,
+      "confidence": 0.2671,
+      "probs": {
+        "0": 0.0814,
+        "1": 0.4072,
+        "2": 0.5114
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 19,
+      "text": "Marketing newsletter unsubscribe reminder",
+      "truth": 0,
+      "score": 0.346,
+      "confidence": 0.5064,
+      "probs": {
+        "0": 0.6709,
+        "1": 0.3122,
+        "2": 0.0169
+      },
+      "latency_s": 0.142
+    },
+    {
+      "id": 20,
+      "text": "Calendar: All-hands recurring event, ignore",
+      "truth": 0,
+      "score": 0.1428,
+      "confidence": 0.8016,
+      "probs": {
+        "0": 0.8677,
+        "1": 0.1217,
+        "2": 0.0106
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 21,
+      "text": "GitHub: dependabot opened 4 PRs",
+      "truth": 0,
+      "score": 0.6258,
+      "confidence": 0.4109,
+      "probs": {
+        "0": 0.3835,
+        "1": 0.6072,
+        "2": 0.0093
+      },
+      "latency_s": 0.191
+    },
+    {
+      "id": 22,
+      "text": "Server room temperature 31C, above threshold",
+      "truth": 2,
+      "score": 0.981,
+      "confidence": 0.6438,
+      "probs": {
+        "0": 0.1282,
+        "1": 0.7626,
+        "2": 0.1092
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 23,
+      "text": "Dentist appointment in 6 minutes, 2 blocks away",
+      "truth": 2,
+      "score": 1.6978,
+      "confidence": 0.6115,
+      "probs": {
+        "0": 0.0432,
+        "1": 0.2158,
+        "2": 0.741
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 24,
+      "text": "FYI your password expires in 2 hours",
+      "truth": 2,
+      "score": 1.7295,
+      "confidence": 0.6584,
+      "probs": {
+        "0": 0.0427,
+        "1": 0.185,
+        "2": 0.7723
+      },
+      "latency_s": 0.143
+    },
+    {
+      "id": 25,
+      "text": "fyi no rush on this at all",
+      "truth": 0,
+      "score": 0.0563,
+      "confidence": 0.9254,
+      "probs": {
+        "0": 0.9503,
+        "1": 0.0431,
+        "2": 0.0066
+      },
+      "latency_s": 0.151
+    },
+    {
+      "id": 26,
+      "text": "Deployment succeeded, customer-visible in 4 min",
+      "truth": 2,
+      "score": 1.3475,
+      "confidence": 0.2087,
+      "probs": {
+        "0": 0.125,
+        "1": 0.4025,
+        "2": 0.4725
+      },
+      "latency_s": 0.146
+    },
+    {
+      "id": 27,
+      "text": "Your Stripe receipt for $0.00",
+      "truth": 0,
+      "score": 0.258,
+      "confidence": 0.6286,
+      "probs": {
+        "0": 0.7524,
+        "1": 0.2371,
+        "2": 0.0104
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 28,
+      "text": "Monitoring: latency up 4%, within tolerance",
+      "truth": 1,
+      "score": 0.2943,
+      "confidence": 0.5674,
+      "probs": {
+        "0": 0.7116,
+        "1": 0.2826,
+        "2": 0.0058
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 29,
+      "text": "Heads up, nothing on fire, low priority housekeeping",
+      "truth": 0,
+      "score": 0.1415,
+      "confidence": 0.7959,
+      "probs": {
+        "0": 0.8639,
+        "1": 0.1307,
+        "2": 0.0054
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 30,
+      "text": "Slack: someone posted a meme in #random",
+      "truth": 0,
+      "score": 0.175,
+      "confidence": 0.7459,
+      "probs": {
+        "0": 0.8306,
+        "1": 0.1637,
+        "2": 0.0056
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 31,
+      "text": "Caleb says: call me now, it's urgent",
+      "truth": 2,
+      "score": 0.9612,
+      "confidence": 0.5868,
+      "probs": {
+        "0": 0.1571,
+        "1": 0.7246,
+        "2": 0.1183
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 32,
+      "text": "Alex moved the design review to Thursday",
+      "truth": 1,
+      "score": 0.86,
+      "confidence": 0.5468,
+      "probs": {
+        "0": 0.2211,
+        "1": 0.6979,
+        "2": 0.081
+      },
+      "latency_s": 0.146
+    },
+    {
+      "id": 33,
+      "text": "Package update available, security fix, low impact",
+      "truth": 1,
+      "score": 0.84,
+      "confidence": 0.6649,
+      "probs": {
+        "0": 0.1917,
+        "1": 0.7766,
+        "2": 0.0317
+      },
+      "latency_s": 0.144
+    },
+    {
+      "id": 34,
+      "text": "Jira: BOT-9921 auto-closed, not actionable",
+      "truth": 0,
+      "score": 0.1692,
+      "confidence": 0.7584,
+      "probs": {
+        "0": 0.8389,
+        "1": 0.1529,
+        "2": 0.0081
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 35,
+      "text": "no action needed, but the deploy is stuck",
+      "truth": 2,
+      "score": 0.7554,
+      "confidence": 0.3855,
+      "probs": {
+        "0": 0.3271,
+        "1": 0.5903,
+        "2": 0.0825
+      },
+      "latency_s": 0.143
+    },
+    {
+      "id": 36,
+      "text": "Someone mentioned you in a thread from 3 days ago",
+      "truth": 0,
+      "score": 0.3901,
+      "confidence": 0.4293,
+      "probs": {
+        "0": 0.6195,
+        "1": 0.3708,
+        "2": 0.0096
+      },
+      "latency_s": 0.146
+    },
+    {
+      "id": 37,
+      "text": "!!! URGENT !!! please read when convenient",
+      "truth": 0,
+      "score": 0.7046,
+      "confidence": 0.4774,
+      "probs": {
+        "0": 0.3219,
+        "1": 0.6516,
+        "2": 0.0265
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 38,
+      "text": "everything is fine, no action needed today",
+      "truth": 0,
+      "score": 0.0443,
+      "confidence": 0.9434,
+      "probs": {
+        "0": 0.9623,
+        "1": 0.0311,
+        "2": 0.0066
+      },
+      "latency_s": 0.145
+    },
+    {
+      "id": 39,
+      "text": "Stripe is deprecating the Charges API on 2026-11-01",
+      "truth": 1,
+      "score": 1.8056,
+      "confidence": 0.7604,
+      "probs": {
+        "0": 0.0346,
+        "1": 0.1252,
+        "2": 0.8402
+      },
+      "latency_s": 0.145
+    }
+  ]
+}

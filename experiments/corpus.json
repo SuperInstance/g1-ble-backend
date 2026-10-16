@@ -1,0 +1,202 @@
+[
+  {
+    "text": "Build finished but nobody is blocked on it",
+    "truth": 1,
+    "id": 0
+  },
+  {
+    "text": "Build 4821 finished: all 24 tests green",
+    "truth": 2,
+    "id": 1
+  },
+  {
+    "text": "Reminder: water plants",
+    "truth": 0,
+    "id": 2
+  },
+  {
+    "text": "CI red on main: 3 failures in auth",
+    "truth": 2,
+    "id": 3
+  },
+  {
+    "text": "npm publish finished, package is live",
+    "truth": 1,
+    "id": 4
+  },
+  {
+    "text": "Test failed, not on your branch, not urgent",
+    "truth": 0,
+    "id": 5
+  },
+  {
+    "text": "Flight UA448 boarding closes in 12 minutes",
+    "truth": 2,
+    "id": 6
+  },
+  {
+    "text": "LinkedIn: 7 people viewed your profile",
+    "truth": 0,
+    "id": 7
+  },
+  {
+    "text": "quick one: prod database is down",
+    "truth": 2,
+    "id": 8
+  },
+  {
+    "text": "PR comment from a bot",
+    "truth": 0,
+    "id": 9
+  },
+  {
+    "text": "3 new mentions, all in #g1-protocol",
+    "truth": 1,
+    "id": 10
+  },
+  {
+    "text": "A dependency you own was deprecated",
+    "truth": 1,
+    "id": 11
+  },
+  {
+    "text": "Weekly newsletter: 47 stories you won't read",
+    "truth": 0,
+    "id": 12
+  },
+  {
+    "text": "2 PRs waiting on your review",
+    "truth": 1,
+    "id": 13
+  },
+  {
+    "text": "Weekly digest ready: 12 unread threads",
+    "truth": 1,
+    "id": 14
+  },
+  {
+    "text": "Battery at 22%, about 4 hours left",
+    "truth": 1,
+    "id": 15
+  },
+  {
+    "text": "minor: your access expires tomorrow morning",
+    "truth": 2,
+    "id": 16
+  },
+  {
+    "text": "Backlog grooming moved to 11:00",
+    "truth": 1,
+    "id": 17
+  },
+  {
+    "text": "Standup moved to 09:30, you have 40 minutes",
+    "truth": 2,
+    "id": 18
+  },
+  {
+    "text": "Marketing newsletter unsubscribe reminder",
+    "truth": 0,
+    "id": 19
+  },
+  {
+    "text": "Calendar: All-hands recurring event, ignore",
+    "truth": 0,
+    "id": 20
+  },
+  {
+    "text": "GitHub: dependabot opened 4 PRs",
+    "truth": 0,
+    "id": 21
+  },
+  {
+    "text": "Server room temperature 31C, above threshold",
+    "truth": 2,
+    "id": 22
+  },
+  {
+    "text": "Dentist appointment in 6 minutes, 2 blocks away",
+    "truth": 2,
+    "id": 23
+  },
+  {
+    "text": "FYI your password expires in 2 hours",
+    "truth": 2,
+    "id": 24
+  },
+  {
+    "text": "fyi no rush on this at all",
+    "truth": 0,
+    "id": 25
+  },
+  {
+    "text": "Deployment succeeded, customer-visible in 4 min",
+    "truth": 2,
+    "id": 26
+  },
+  {
+    "text": "Your Stripe receipt for $0.00",
+    "truth": 0,
+    "id": 27
+  },
+  {
+    "text": "Monitoring: latency up 4%, within tolerance",
+    "truth": 1,
+    "id": 28
+  },
+  {
+    "text": "Heads up, nothing on fire, low priority housekeeping",
+    "truth": 0,
+    "id": 29
+  },
+  {
+    "text": "Slack: someone posted a meme in #random",
+    "truth": 0,
+    "id": 30
+  },
+  {
+    "text": "Caleb says: call me now, it's urgent",
+    "truth": 2,
+    "id": 31
+  },
+  {
+    "text": "Alex moved the design review to Thursday",
+    "truth": 1,
+    "id": 32
+  },
+  {
+    "text": "Package update available, security fix, low impact",
+    "truth": 1,
+    "id": 33
+  },
+  {
+    "text": "Jira: BOT-9921 auto-closed, not actionable",
+    "truth": 0,
+    "id": 34
+  },
+  {
+    "text": "no action needed, but the deploy is stuck",
+    "truth": 2,
+    "id": 35
+  },
+  {
+    "text": "Someone mentioned you in a thread from 3 days ago",
+    "truth": 0,
+    "id": 36
+  },
+  {
+    "text": "!!! URGENT !!! please read when convenient",
+    "truth": 0,
+    "id": 37
+  },
+  {
+    "text": "everything is fine, no action needed today",
+    "truth": 0,
+    "id": 38
+  },
+  {
+    "text": "Stripe is deprecating the Charges API on 2026-11-01",
+    "truth": 1,
+    "id": 39
+  }
+]
