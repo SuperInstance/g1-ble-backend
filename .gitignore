@@ -23,6 +23,11 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Secrets — never commit real credentials. .env.example IS committed.
+.env
+.env.*
+!.env.example
+
 # Local capture artifacts
 *.log
 capture/

@@ -69,40 +69,146 @@ DEFAULT_MAX_DISPLAY_WORDS = 25
 # LLM configuration
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class Provider:
+    """
+    A known endpoint that speaks the OpenAI Chat Completions protocol.
+
+    These are presets, not a whitelist. Any OpenAI-compatible server works by
+    setting a base URL, and anything not listed here can be used via the
+    ``custom`` provider or by pointing ``OPENAI_BASE_URL`` at it directly.
+    """
+
+    name: str
+    base_url: str | None
+    key_env: tuple[str, ...]
+    default_primary: str | None
+    default_compressor: str | None
+    local: bool = False  # local servers generally do not validate the API key
+
+
+PROVIDERS: dict[str, Provider] = {
+    "openai": Provider(
+        "openai", None, ("OPENAI_API_KEY",),
+        "gpt-4o-mini", "gpt-4o-mini",
+    ),
+    "ollama": Provider(
+        "ollama", "http://127.0.0.1:11434/v1", ("OLLAMA_API_KEY",),
+        None, None, local=True,
+    ),
+    "lmstudio": Provider(
+        "lmstudio", "http://127.0.0.1:1234/v1", ("LMSTUDIO_API_KEY",),
+        None, None, local=True,
+    ),
+    "llamacpp": Provider(
+        "llamacpp", "http://127.0.0.1:8080/v1", ("LLAMACPP_API_KEY",),
+        None, None, local=True,
+    ),
+    "vllm": Provider(
+        "vllm", "http://127.0.0.1:8000/v1", ("VLLM_API_KEY",),
+        None, None, local=True,
+    ),
+    "openrouter": Provider(
+        "openrouter", "https://openrouter.ai/api/v1", ("OPENROUTER_API_KEY",),
+        "openai/gpt-4o-mini", "openai/gpt-4o-mini",
+    ),
+    "groq": Provider(
+        "groq", "https://api.groq.com/openai/v1", ("GROQ_API_KEY",),
+        "llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+    ),
+    "together": Provider(
+        "together", "https://api.together.xyz/v1", ("TOGETHER_API_KEY",),
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    ),
+    "deepseek": Provider(
+        "deepseek", "https://api.deepseek.com/v1", ("DEEPSEEK_API_KEY",),
+        "deepseek-chat", "deepseek-chat",
+    ),
+    # Escape hatch: base URL and models come entirely from the environment.
+    "custom": Provider("custom", None, ("OPENAI_API_KEY", "G1_API_KEY"),
+                       None, None, local=False),
+}
+
+# Placeholder sent when a local server ignores the key entirely. The OpenAI
+# SDK refuses to build a client without *some* key value.
+LOCAL_PLACEHOLDER_KEY = "not-needed"
+
+
 @dataclass
 class LLMConfig:
     """
     Runtime configuration for both pipeline stages.
 
-    Populated entirely from environment variables so the same code works
-    against OpenAI and against any OpenAI-compatible local server
-    (Ollama, LM Studio, vLLM, llama.cpp) without code changes.
+    Resolved from a provider preset plus environment overrides, so the same
+    code runs against a cloud API or a local model server unchanged.
     """
 
     api_key: str | None
     base_url: str | None
-    primary_model: str
-    compressor_model: str
+    primary_model: str | None
+    compressor_model: str | None
     timeout: float
     max_retries: int
     max_display_words: int
+    provider: str = "custom"
 
     @property
     def target(self) -> str:
         """Human-readable description of where requests are going."""
         return self.base_url or "https://api.openai.com/v1"
 
+    @property
+    def is_local(self) -> bool:
+        return PROVIDERS.get(self.provider, PROVIDERS["custom"]).local
 
-def build_llm_config() -> LLMConfig:
-    """
-    Read LLM settings from the environment.
 
-    ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` are honoured automatically by the
-    SDK as well; we read them explicitly so we can validate and report before
-    any network call is attempted.
+def build_llm_config(provider: str | None = None) -> LLMConfig:
     """
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("G1_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("G1_BASE_URL")
+    Resolve LLM settings from a provider preset plus environment overrides.
+
+    Resolution order, lowest priority last:
+
+    1. ``--provider`` / ``G1_PROVIDER`` selects a preset (default ``openai``).
+    2. ``OPENAI_BASE_URL`` / ``G1_BASE_URL`` override the preset's base URL.
+    3. The first populated key variable wins: the provider's own key variable,
+       then ``OPENAI_API_KEY`` / ``G1_API_KEY``.
+    4. ``G1_PRIMARY_MODEL`` / ``OPENAI_MODEL`` / ``G1_COMPRESSOR_MODEL``
+       override model names.
+
+    Nothing is hardcoded to one vendor. Any server implementing
+    ``POST {base_url}/chat/completions`` works.
+    """
+    name = (provider or os.environ.get("G1_PROVIDER") or "openai").strip().lower()
+    preset = PROVIDERS.get(name)
+    if preset is None:
+        raise LLMUnavailable(
+            f"unknown provider {name!r}. Known: {', '.join(sorted(PROVIDERS))}.\n"
+            f"    Or set OPENAI_BASE_URL directly for any OpenAI-compatible server."
+        )
+
+    base_url = (
+        os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("G1_BASE_URL")
+        or preset.base_url
+    )
+
+    # First populated key wins; local servers get a placeholder if nothing set.
+    api_key: str | None = None
+    for var in (*preset.key_env, "OPENAI_API_KEY", "G1_API_KEY"):
+        value = os.environ.get(var)
+        if value:
+            api_key = value
+            break
+    if api_key is None and preset.local:
+        api_key = LOCAL_PLACEHOLDER_KEY
+
+    primary = (
+        os.environ.get("G1_PRIMARY_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or preset.default_primary
+    )
+    compressor = os.environ.get("G1_COMPRESSOR_MODEL") or preset.default_compressor
 
     def _float(name: str, default: float) -> float:
         raw = os.environ.get(name)
@@ -113,13 +219,6 @@ def build_llm_config() -> LLMConfig:
         except ValueError:
             print(f"  ! {name}={raw!r} is not a number; using {default}", file=sys.stderr)
             return default
-
-    primary = (
-        os.environ.get("G1_PRIMARY_MODEL")
-        or os.environ.get("OPENAI_MODEL")
-        or "gpt-4o-mini"
-    )
-    compressor = os.environ.get("G1_COMPRESSOR_MODEL") or primary
 
     return LLMConfig(
         api_key=api_key,
@@ -132,6 +231,7 @@ def build_llm_config() -> LLMConfig:
             os.environ.get("G1_MAX_DISPLAY_WORDS", str(DEFAULT_MAX_DISPLAY_WORDS))
             or DEFAULT_MAX_DISPLAY_WORDS
         ),
+        provider=preset.name,
     )
 
 
@@ -140,8 +240,9 @@ def describe_llm_config(config: LLMConfig) -> str:
     key_state = "set" if config.api_key else "MISSING"
     same = " (same as stage 1)" if config.compressor_model == config.primary_model else ""
     return (
-        f"target={config.target}  stage1={config.primary_model}  "
-        f"stage2={config.compressor_model}{same}  key={key_state}"
+        f"provider={config.provider}  target={config.target}  "
+        f"stage1={config.primary_model}  stage2={config.compressor_model}{same}  "
+        f"key={key_state}"
     )
 
 
@@ -166,11 +267,10 @@ def make_client(config: LLMConfig):
 
     if not config.api_key:
         raise LLMUnavailable(
-            "no API key found.\n"
-            "    set OPENAI_API_KEY for OpenAI, or point at a local server:\n"
-            "      export OPENAI_BASE_URL=http://localhost:11434/v1\n"
-            "      export OPENAI_API_KEY=ollama\n"
-            "      export OPENAI_MODEL=qwen2.5:7b"
+            f"no API key found for provider {config.provider!r}.\n"
+            "    cloud:  export OPENAI_API_KEY=sk-...\n"
+            "    local:  python main.py --provider ollama   (no key needed)\n"
+            f"    known providers: {', '.join(sorted(PROVIDERS))}"
         )
 
     return AsyncOpenAI(
@@ -187,6 +287,70 @@ class LLMUnavailable(RuntimeError):
 
 class LLMStageError(RuntimeError):
     """Raised when a single stage fails. Never fatal to the BLE session."""
+
+
+# ---------------------------------------------------------------------------
+# Model discovery
+# ---------------------------------------------------------------------------
+
+async def list_available_models(config: LLMConfig, client=None) -> list[str]:
+    """
+    Ask the endpoint which models it serves, via the standard ``GET /models``.
+
+    Works against any OpenAI-compatible server: local runtimes expose only
+    the models they have pulled, so this avoids hardcoding a name that may not
+    exist on the current machine.
+    """
+    client = client or make_client(config)
+    try:
+        page = await client.models.list()
+    except Exception as exc:
+        raise LLMUnavailable(
+            f"could not list models at {config.target}: {exc}\n"
+            "    Set G1_PRIMARY_MODEL explicitly to skip discovery."
+        ) from exc
+
+    ids: list[str] = []
+    for entry in getattr(page, "data", None) or []:
+        ident = getattr(entry, "id", None) or (
+            entry.get("id") if isinstance(entry, dict) else None
+        )
+        if ident:
+            ids.append(ident)
+    return ids
+
+
+async def ensure_models(config: LLMConfig, client=None) -> LLMConfig:
+    """
+    Fill in any missing model name by discovering what the server has.
+
+    Local presets deliberately ship with no default model name, so a fresh
+    checkout works against whatever the user has already pulled. The choice is
+    printed rather than made silently.
+    """
+    if config.primary_model and config.compressor_model:
+        return config
+
+    available = await list_available_models(config, client)
+    if not available:
+        raise LLMUnavailable(
+            f"{config.target} reported no models.\n"
+            "    With Ollama: ollama pull qwen2.5:7b"
+        )
+
+    chosen = config.primary_model or available[0]
+    print(
+        f"[llm] {config.target} serves {len(available)} model(s); "
+        f"using {chosen!r}",
+        flush=True,
+    )
+    if len(available) > 1:
+        print(f"[llm] available: {', '.join(available)}", flush=True)
+
+    config.primary_model = chosen
+    if not config.compressor_model:
+        config.compressor_model = chosen
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -257,16 +421,18 @@ COMPRESSOR_SYSTEM_PROMPT = (
     "the text that will be rendered on the lenses.\n\n"
     "HARD CONSTRAINTS — these are physical limits of the display, not style "
     "preferences:\n"
-    "1. Output between 20 and 25 words. NEVER exceed 25 words. If the answer "
-    "cannot be said in 25 words, drop everything except the core fact.\n"
-    "2. No preamble, no greeting, no sign-off, no restating the question. No "
+    "1. NEVER exceed 25 words. This is a hard cap; going over is a failure.\n"
+    "2. Aim for 20-25 words. If your first draft is shorter, add the next most "
+    "important concrete detail (a number, a name, a mechanism) rather than "
+    "padding.\n"
+    "3. No preamble, no greeting, no sign-off, no restating the question. No "
     "\"Sure\", no \"Here's\", no \"In summary\".\n"
-    "3. No markdown: no bullet characters, no headers, no bold or italics, no "
+    "4. No markdown: no bullet characters, no headers, no bold or italics, no "
     "code fences.\n"
-    "4. No emoji, no quotation marks around the whole line.\n"
-    "5. Lead with the single most important fact. Keep numbers, names, units "
+    "5. No emoji, no quotation marks around the whole line.\n"
+    "6. Lead with the single most important fact. Keep numbers, names, units "
     "and error codes — they survive truncation; drop connective prose first.\n"
-    "6. Punchy and scannable, as if read in a second while walking.\n\n"
+    "7. Punchy and scannable, as if read in a second while walking.\n\n"
     "Output the display text and nothing else. No preamble, no explanation of "
     "your choices, no surrounding quotes."
 )
@@ -480,6 +646,7 @@ async def run_pipeline(
     """
     config = config or build_llm_config()
     client = client or make_client(config)
+    config = await ensure_models(config, client)
 
     result = PipelineResult(query=query, stage1=None, stage2=None, display_text="")
 
@@ -755,8 +922,10 @@ async def repl(
                     continue
                 print("\n[1/2] thinking ...", flush=True)
                 try:
+                    client = make_client(config)
+                    config = await ensure_models(config, client)
                     answer = await generate_primary_response(
-                        rest, config=config
+                        rest, client=client, config=config
                     )
                     print(f"\n--- stage 1 ({word_count(answer)} words) ---\n{answer}\n")
                 except LLMUnavailable as exc:
@@ -820,9 +989,23 @@ async def repl(
 # ---------------------------------------------------------------------------
 
 async def run(args: argparse.Namespace) -> int:
+    # -- list-models short-circuits before touching the radio --------------
+    if args.list_models:
+        config = build_llm_config(args.provider)
+        try:
+            models = await list_available_models(config)
+        except LLMUnavailable as exc:
+            sys.stdout.flush()
+            print(f"\n{exc}", file=sys.stderr)
+            return 2
+        print(f"Models served by {config.target}:")
+        for name in models or ["(none reported)"]:
+            print(f"  {name}")
+        return 0
+
     # -- llm-check short-circuits before touching the radio -----------------
     if args.llm_check:
-        config = build_llm_config()
+        config = build_llm_config(args.provider)
         if args.max_display_words:
             config.max_display_words = args.max_display_words
         print(f"LLM config: {describe_llm_config(config)}")
@@ -832,6 +1015,7 @@ async def run(args: argparse.Namespace) -> int:
             sys.stdout.flush()
             print(f"\nLLM not configured:\n{exc}", file=sys.stderr)
             return 2
+        config = await ensure_models(config, client)
         print("\nprobing stage 2 with a one-word test input ...")
         try:
             probe = await condense_for_glasses(
@@ -846,7 +1030,7 @@ async def run(args: argparse.Namespace) -> int:
 
     preflight()
 
-    config = build_llm_config()
+    config = build_llm_config(args.provider)
     # An explicit flag overrides the environment value.
     if args.max_display_words:
         config.max_display_words = args.max_display_words
@@ -1170,6 +1354,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- pipeline ---------------------------------------------------------
     parser.add_argument(
+        "--provider", metavar="NAME", choices=sorted(PROVIDERS),
+        help=(
+            "LLM provider preset: "
+            + ", ".join(sorted(PROVIDERS))
+            + " (default: openai, or $G1_PROVIDER)"
+        ),
+    )
+    parser.add_argument(
+        "--list-providers", action="store_true",
+        help="print the provider presets and exit",
+    )
+    parser.add_argument(
         "--ask", metavar="QUERY",
         help="run one pipeline query (stage 1 -> stage 2 -> BLE) and exit",
     )
@@ -1180,6 +1376,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--one-shot", action="store_true",
         help="never enter the REPL; send --text and exit",
+    )
+    parser.add_argument(
+        "--list-models", action="store_true",
+        help="ask the configured endpoint which models it serves, then exit",
     )
     parser.add_argument(
         "--llm-check", action="store_true",
@@ -1279,6 +1479,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not args.verbose:
         logging.getLogger("bleak").setLevel(logging.WARNING)
+
+    if args.list_providers:
+        print("Provider presets (all speak the OpenAI Chat Completions API):\n")
+        for name in sorted(PROVIDERS):
+            p = PROVIDERS[name]
+            key = " (no key needed)" if p.local else f" key: {p.key_env[0]}"
+            url = p.base_url or "default OpenAI endpoint"
+            print(f"  {name:<11} {url}{key}")
+            print(f"  {'':<11} stage1={p.default_primary}  stage2={p.default_compressor}")
+        print(
+            "\nAny other OpenAI-compatible server works via:\n"
+            "  export OPENAI_BASE_URL=http://host:port/v1\n"
+            "  export OPENAI_API_KEY=anything\n"
+            "  export OPENAI_MODEL=<model-name>\n"
+            "\nOverrides always win over presets:"
+            " OPENAI_BASE_URL, G1_PRIMARY_MODEL, G1_COMPRESSOR_MODEL,\n"
+            "G1_LLM_TIMEOUT, G1_LLM_RETRIES, G1_MAX_DISPLAY_WORDS."
+        )
+        return 0
 
     if args.selftest:
         return selftest_pipeline()
