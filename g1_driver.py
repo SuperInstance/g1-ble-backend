@@ -1105,14 +1105,23 @@ class EvenG1Controller:
         seq = 0
         packets: list[bytes] = []
         for index, chunk in enumerate(chunks):
+            # `packet_index`/`total_packets` describe reassembly of the BLE
+            # fragments and are correct as-is. `page`/`max_page` are a
+            # DIFFERENT thing: they index SCREENS, not packets. One card is
+            # one screen here, so they must stay 0/1.
+            #
+            # Conflating them is only invisible at a high MTU. At MTU 23 a
+            # 120-character card fragments into ~4 packets, and labelling
+            # them "page 0 of 4 ... 3 of 4" makes the glasses render four
+            # fragment screens instead of one coherent card.
             packets.append(
                 build_text_packet(
                     chunk.decode("utf-8", errors="replace"),
                     seq=seq,
                     packet_index=index,
                     total_packets=total,
-                    page=index,
-                    total_pages=total,
+                    page=0,
+                    total_pages=1,
                 )
             )
             seq = (seq + 1) & 0xFF

@@ -837,6 +837,22 @@ def selftest() -> int:
     check("long single word still sent",
           len(enforce_display_budget("x" * 400)) > 0, True)
 
+    print("\npage fields are screens, not BLE fragments")
+    from g1_driver import EvenG1Controller
+
+    controller = EvenG1Controller()
+    # MTU 23 fragments a card; the glasses must still see ONE screen.
+    fragmented = controller.build_text_packets(
+        "word " * 20, chars_per_line=24, mtu=23
+    )
+    check("fragments produced at MTU 23", len(fragmented) > 1, True)
+    check("every fragment reports page 0 of 1",
+          all((p[7], p[8]) == (0, 1) for p in fragmented), True)
+    check("fragment index still carried for reassembly",
+          [p[3] for p in fragmented], list(range(len(fragmented))))
+    check("fragment count still carried",
+          all(p[2] == len(fragmented) for p in fragmented), True)
+
     print("\nasync pipeline checks")
 
     async def async_checks() -> None:
