@@ -252,7 +252,14 @@ class Interaction:
 @dataclass(frozen=True)
 class WearerContext:
     """
-    A snapshot of what the learning store knows, taken BEFORE the LLMs run.
+    A snapshot of what the learning store knows.
+
+    It used to be taken BEFORE the LLMs run, which was true only of the
+    prompt-injection path removed in 5b873e8. Both remaining callers take it
+    AFTER the answer is already on the lens: a log line in Session._record
+    and the --weights display. The docstring was left claiming otherwise by
+    the removal, which is the usual way this goes wrong — the code changes
+    and the sentence describing it does not.
 
     Deliberately frozen and self-describing rather than a formatted string, so
     the caller can decide what to say to the model, what to log, and what to
@@ -653,6 +660,13 @@ class FeedbackStore:
         were written against, and it was briefly deleted during the
         topic_evidence refactor, which left top_topics() calling a method that
         no longer existed.
+
+        Note the justification is now self-defeating. No third-party plugin can
+        actually be loaded, because ``plugins.discover()`` is never called from
+        anywhere in the shipped package — see documents/19. Both this and
+        top_topics() are dead in the meantime, which experiments/wiring_audit.py
+        reports. They are kept because the accessors are correct and the data
+        underneath them is measured, not because anything consumes them yet.
         """
         return {
             term: info["weight"]
@@ -672,9 +686,12 @@ class FeedbackStore:
         """
         Topics with enough *distinct-card* evidence to call an interest.
 
-        This is the only accessor meant for prompt injection. It refuses to
-        name a topic seen on fewer than ``min_cards`` cards, because a topic
-        backed by one card is a fact about one card, not about the wearer.
+        This was the only accessor meant for prompt injection. It no longer
+        feeds any prompt: the injection was measured and removed
+        (documents/18). The accessor stays because the gate it implements —
+        a topic backed by one card is a fact about one card, not about the
+        wearer — is the correct reading of the data regardless of who reads
+        it, and `main.py --weights` still reports it to a human.
 
         Sorted by WEIGHT, with card count only as a tie-break. Card count is a
         gate, not a ranking signal: sorting on it first meant a topic

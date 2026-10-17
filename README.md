@@ -63,11 +63,16 @@ terminal query / TouchBar tap
         v
   Session.ask() / Session.more()          session.py    card stack, drill-down
         │
-        ├─ pipeline.run_query()            pipeline.py   stage 1 reason -> stage 2 compress
+        ├─ pipeline.run_query()            pipeline.py   one call by default;
+        │       │                                        two-stage via --two-stage
         │       │                                        + glanceability gate + repair
+        │       │                                        (finalize_display_text, both paths)
         │       v
         │   EvenG1Controller.send_text_packet()         0x4E packet -> BOTH arms
         │       g1_driver.py     scan, connect, MTU, heartbeat, TouchBar capture
+        │
+        ├─ interrupt.plan()                   interrupt.py DRY RUN TODAY: decides
+        │       │                                        push vs queue, no BLE write
         │
         ├─ memory.FeedbackStore              memory.py    cards + reactions, SQLite
         └─ policy.Policy                     policy.py    contested decisions, resolved
@@ -225,7 +230,10 @@ Everything here is reproducible and every number is computed from a real run.
 .venv/bin/python experiments/policy_axes.py     # every axis resolves from evidence
 .venv/bin/python experiments/store_stress.py    # 400 concurrent writes, zero loss
 .venv/bin/python experiments/learning_substrate.py  # does the interest signal survive?
-.venv/bin/python experiments/adaptive_loop.py   # ingestion, gating, heartbeat isolation
+.venv/bin/python experiments/adaptive_loop.py   # no prompt carries the wearer; heartbeat isolation
+.venv/bin/python experiments/interrupt_gate.py   # push-vs-queue: silence, budget, ordering
+.venv/bin/python experiments/wiring_audit.py     # nothing advertised is left unwired (fails the build)
+.venv/bin/python main.py --queue --queue-dir .   # dry-run the interrupt decision on a spool
 
 ollaya serve                                   # required for the two below
 .venv/bin/python experiments/score_corpus.py   # winnow discrimination over 40 candidates
@@ -254,8 +262,9 @@ Reports: **[REPORT-A.md](experiments/results/REPORT-A.md)** ·
 
 ### The adaptive loop, and what is still unproven
 
-`run_query()` reads the store **before** either model runs, so stage 2
-compresses against known interests rather than after the fact. The loop:
+`run_query()` no longer reads the store at all. The injection that consumed it
+was measured and removed ([below](#it-does-not-earn-its-place--measured-not-assumed-and-now-removed)),
+so the loop today is:
 
 ```
 tap ──► _record()  ──to_thread──► SQLite (events, cards)
@@ -396,6 +405,7 @@ corrections are kept visible rather than quietly edited:
 | 16 | [Play-test: the first real run](documents/16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
 | 17 | [JEV and JEPA: what transfers](documents/17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
 | 18 | [Personalisation, measured](documents/18-personalisation-measured.md) | The A/B, the verdict, and the removal — including a third injection site that was never wired to anything. |
+| 19 | [The wiring audit](documents/19-wiring-audit.md) | What is described as working and is not: the dormant plugin seam, a gate that stopped running, and a decision function that did not exist. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.
@@ -411,7 +421,8 @@ pipeline.py        LLM stages, provider presets, glanceability gate, repair
 session.py         card lifecycle, drill-down, reaction recording
 memory.py          local feedback store (cards, reactions, topic weights)
 policy.py          contested decisions as axes with deciding metrics
-plugins.py         extension seam: role overrides, entry-point discovery
+interrupt.py       push-vs-queue decision; dry-run only, no BLE write
+plugins.py         extension seam — NOT BOOTSTRAPPED, see documents/19
 sim/               synthetic event source, decisions ledger, virtual wearer
 experiments/       reproducible measurements against local models
 documents/         design history, including the wrong turns

@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from memory import Card, FeedbackStore, extract_keywords
-from policy import resolve
+from policy import load
 from pipeline import (
     LLMConfig,
     LLMStageError,
@@ -114,7 +114,15 @@ class Session:
         # Contested design questions are resolved at setup and read here as a
         # flat answer. The runtime does not re-argue them; it reads a decision
         # that a metric already made. See policy.py.
-        self.policy = policy if policy is not None else resolve()
+        #
+        # `load()`, not `resolve()`. `resolve()` takes evidence and overrides
+        # as arguments and knows nothing about disk; `load()` is the one that
+        # reads the file `main.py --set-policy` writes. Calling `resolve()`
+        # here meant a saved override was honoured by `--policy` when printing
+        # it and silently ignored when actually running — the worst possible
+        # split, because the operator's confirmation screen disagreed with the
+        # behaviour they then got.
+        self.policy = policy if policy is not None else load()
         self.send = send
         self.store = store
         self.config = config or LLMConfig(

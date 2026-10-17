@@ -2,11 +2,38 @@
 plugins.py
 ==========
 
-The extension seam.
+The extension seam — **and nothing calls into it.**
 
-Everything beyond the core pipeline — a fast local model for rapid
-summarisation, an external service like typesafe.ai or laya, a different
-provider for the meta pass — plugs in here rather than being hardcoded.
+Read that before you use anything in this module. Every public entry point
+here is uncalled by the shipped package:
+
+    discover()                  never called  -> no entry-point plugin loads
+    install_builtin_plugins()   never called  -> no env-var plugin registers
+    resolve_config()            never called  -> no plugin can alter a config
+    maybe_refine()              never called  -> the refine pass never runs
+    preferred_profile()         never called  -> the cached profile is unread
+
+No shipped module imports this file. ``main.py`` mentions "plugins" once, in
+an ASCII diagram, which is a good part of how this stayed invisible. So the
+worked example below works, and the sentence "nothing else in the codebase
+changes" is true in a way that is worse than it sounds: nothing in the
+codebase changes because nothing in the codebase uses any of it.
+
+This was found by ``experiments/wiring_audit.py``, which reports uncalled
+public functions mechanically, after ``RefinementPlugin``'s docstring was
+caught claiming an injection that ``preferred_profile()`` had never performed.
+One false claim turned out to be a symptom of a whole dormant subsystem.
+See documents/19.
+
+WHAT IT IS FOR. Everything beyond the core pipeline — a fast local model for
+rapid summarisation, an external service, a different provider for the meta
+pass — is meant to plug in here rather than being hardcoded. The design is
+sound; the wiring is absent. Wiring it is a one-line-per-entry-point job, but
+it is not done here deliberately: ``maybe_refine()`` would re-enable a
+personalisation mechanism that was measured and removed (documents/18), and
+``resolve_config()`` would let a plugin change model routing with no
+measurement behind the change. Both should wait for a decision, not for
+someone to type an import.
 
 The contract is deliberately tiny. A plugin declares which **roles** it can
 serve and optionally:
@@ -20,20 +47,19 @@ Two ways in:
 
 1. **In-process** — call :func:`register` before starting the session.
 2. **Out-of-process** — declare a setuptools entry point in the group
-   ``g1_ble_backend.plugins``; :func:`discover` picks it up automatically::
+   ``g1_ble_backend.plugins``; :func:`discover` would pick it up automatically
+   *if anything called it*::
 
        # pyproject.toml of your package
        [project.entry-points."g1_ble_backend.plugins"]
        my-plugin = "my_package.g1:MyPlugin"
 
-A worked example::
+A worked example, which you will have to wire up yourself::
 
     from plugins import ModelRolePlugin, register
 
     # tev1 is a small local model: good enough to compress fast.
     register(ModelRolePlugin("tev1-fast", model="tev1", roles=("stage2",)))
-
-That is the whole integration. Nothing else in the codebase changes.
 """
 
 from __future__ import annotations

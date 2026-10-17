@@ -47,6 +47,9 @@ import contextlib
 import logging
 import sys
 import time
+from datetime import datetime, timezone
+
+from pathlib import Path
 
 from bleak import BleakBackend
 from bleak.backends import get_default_backend
@@ -87,6 +90,11 @@ log = logging.getLogger("g1")
 
 DEFAULT_TEST_TEXT = "Terminal connection established. System online."
 DEFAULT_HOLD_SECONDS = 30.0
+
+
+def _indent(text: str, prefix: str = "  ") -> str:
+    """Indent every line of a block, for embedding reports in CLI output."""
+    return "\n".join(prefix + line for line in text.splitlines())
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +531,57 @@ async def run(args: argparse.Namespace) -> int:
         store.close()
         return 0
 
+    if args.queue_dir or args.queue:
+        import interrupt as queue_mod
+        from policy import load as load_policy
+
+        pol = load_policy()
+        cands = queue_mod.load_outbox(
+            Path(args.queue_dir) if args.queue_dir else queue_mod.OUTBOX)
+        budget = queue_mod.Budget()
+        if args.queue_label_days:
+            # Lets an operator see what the decision WOULD do with history
+            # without having history. Printed loudly, because a dry run that
+            # suddenly pushes is exactly the kind of thing that gets mistaken
+            # for the real behaviour.
+            budget.label_days = args.queue_label_days
+        verdicts = queue_mod.plan(cands, budget=budget,
+                                 overrides=pol.overrides)
+
+        print(f"Interrupt queue — DRY RUN, nothing is sent to the glasses\n")
+        print(f"  outbox     {args.queue_dir or queue_mod.OUTBOX}")
+        print(f"  candidates {len(cands)}")
+        if args.queue_label_days:
+            print(f"  !! label_days forced to {args.queue_label_days}; this is "
+                  f"NOT the default posture")
+        print(f"\n  policy:\n{_indent(pol.report(), '    ')}")
+        if not verdicts:
+            print("\n  nothing waiting.")
+        else:
+            now = datetime.now(timezone.utc)
+            print(f"\n  {'action':<6} {'gate':<12} {'G2':<4} {'src':<8} why")
+            print(f"  {'-' * 78}")
+            would_qualify = 0
+            for v in verdicts:
+                mark = "PUSH" if v.is_push else "queue"
+                # Shadow column: what G2 alone would say, independent of the
+                # policy axis. Without it a dry run where everything queues on
+                # the axis tells an operator nothing about whether their
+                # candidates would even qualify — and "policy blocked it" and
+                # "it was never eligible" are completely different problems.
+                g2_ok, _g2_why = v.candidate.eligible(now)
+                would_qualify += bool(g2_ok)
+                print(f"  {mark:<6} {v.gate:<12} {'yes' if g2_ok else 'no':<4} "
+                      f"{v.candidate.source[:8]:<8} {v.reason}")
+            print(f"\n  G2 column is shadow information, not the decision: "
+                  f"{would_qualify}/{len(verdicts)} would qualify on the "
+                  f"deterministic rules alone.")
+            for v in verdicts:
+                if v.gate == "eligibility":
+                    print(f"    ineligible: {v.candidate.source} — {v.reason}")
+        print(f"\n  {queue_mod.summarize(verdicts)}")
+        return 0
+
     if args.policy:
         from policy import load as load_policy
 
@@ -809,6 +868,25 @@ def build_parser() -> argparse.ArgumentParser:
              "by default: measured 9-13x slower at identical answer relevance "
              "and no measured protection against invented numbers. Turn this "
              "on to compare, or to fall back if one-stage quality regresses.",
+    )
+    parser.add_argument(
+        "--queue", action="store_true",
+        help="run the interrupt decision over the outbox and print what "
+             "would happen, then exit. DRY RUN: no radio, no glasses, no "
+             "BLE write. Everything queues unless policy.push_enabled is on, "
+             "which needs 14 days of label history.",
+    )
+    parser.add_argument(
+        "--queue-dir", default=None, metavar="DIR",
+        help="read candidates from DIR instead of ~/.g1/outbox. Pairs with "
+             "--queue; useful for replaying a captured spool.",
+    )
+    parser.add_argument(
+        "--queue-label-days", type=int, default=0, metavar="N",
+        help="pretend N days of label history exist, to see what the "
+             "decision would do with evidence. Off by default and printed "
+             "loudly, because a dry run that pushes looks like the real "
+             "posture.",
     )
     parser.add_argument(
         "--weights", action="store_true",

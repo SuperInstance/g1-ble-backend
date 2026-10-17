@@ -29,6 +29,7 @@ changed* is more useful than a clean final story.
 | 16 | [Play-test: the first real run](16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
 | 17 | [JEV and JEPA: what transfers](17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
 | 18 | [Personalisation, measured](18-personalisation-measured.md) | The A/B finally run, the verdict, and the removal — including a third injection site that was never wired to anything. |
+| 19 | [The wiring audit](19-wiring-audit.md) | What is described as working and is not: the dormant plugin seam, a gate that stopped running, and a decision function that did not exist. |
 
 The synthesised design is [`../DESIGN.md`](../DESIGN.md).
 

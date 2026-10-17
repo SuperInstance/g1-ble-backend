@@ -533,8 +533,14 @@ def fits_display(
     return (len(cleaned) + per_line - 1) // per_line
 
 
-# Retained name: existing call sites and the compressor prompt still refer to a
-# word budget, and it now forwards to the character-aware implementation.
+# Retained name only. This wrapper had nine call sites until the
+# enforce_display_budget refactor (1b1f5c1) moved them all; it was kept with a
+# comment claiming those call sites still existed, which they did not, for as
+# long as the claim stood. `experiments/wiring_audit.py` reports it as uncalled,
+# which is correct. Kept because removing a public name is a breaking change
+# for anything importing it — but it has no caller in this repository and the
+# comment saying otherwise was a small, ordinary instance of the defect class
+# documented in documents/19.
 def enforce_word_budget(text: str, max_words: int = DEFAULT_MAX_DISPLAY_WORDS) -> str:
     """Backwards-compatible wrapper around :func:`enforce_display_budget`."""
     return enforce_display_budget(text, max_words=max_words)
@@ -984,6 +990,37 @@ async def condense_for_glasses(
     if not text.strip():
         raise LLMStageError("stage 2 returned an empty response")
 
+    return finalize_display_text(text, config, origin="stage 2")
+
+
+def finalize_display_text(
+    text: str,
+    config: LLMConfig,
+    *,
+    origin: str = "answer",
+) -> str:
+    """
+    Everything that must happen to text before it reaches the lenses.
+
+    This used to be inlined in ``condense_for_glasses``, which is the bug this
+    function exists to fix. When the architecture flipped to one call by
+    default (d646cfd), the glanceability gate went with it: it lived inside
+    the stage-2 compressor, stage 2 stopped running by default, and so the
+    gate stopped running by default. Nothing broke, no test failed, and the
+    README kept advertising "stage 1 -> stage 2 + glanceability gate" as the
+    pipeline shape. The gate had simply stopped being part of the pipeline.
+
+    A measured mechanism that only runs on the non-default path is not
+    load-bearing. That is the whole finding, and it is why the check is here
+    rather than in a caller: every path that produces display text now goes
+    through the same three steps, so a future architecture change cannot
+    quietly drop one of them again.
+
+    Order matters. The budget is enforced FIRST, because it is a physical
+    limit and a repair that pushes text back over the line would be a repair
+    that breaks the constraint. The glanceability check runs on the text that
+    will actually be shown, not on the text the model produced.
+    """
     final = enforce_display_budget(
         text,
         max_chars=config.max_display_chars,
@@ -998,13 +1035,12 @@ async def condense_for_glasses(
     if not check.ok:
         repaired = repair_buried_fact(final)
         if repaired and check_glanceable(repaired).ok:
-            log.info("stage 2 repaired: %s -> %r", check.reason, repaired)
+            log.info("%s repaired: %s -> %r", origin, check.reason, repaired)
             final = repaired
-            check = check_glanceable(final)
         else:
             # Still weak: keep it, but say so, so the caller can log it as a
             # candidate for the review queue rather than silently degrading.
-            log.warning("stage 2 output not glanceable: %s", check.why())
+            log.warning("%s output not glanceable: %s", origin, check.why())
             final = repaired or final
 
     return final
@@ -1142,12 +1178,14 @@ async def run_query(
     if result.stage2:
         result.display_text = result.stage2
     elif result.stage1:
-        result.display_text = enforce_display_budget(
-            result.stage1,
-            max_chars=config.max_display_chars,
-            max_words=config.max_display_words,
-        )
-        say("      (using locally truncated stage 1 — compressor unavailable)")
+        # This branch is the NORMAL path in one-call mode, not a fallback:
+        # stage1 IS the display text there. It used to apply only the
+        # character budget, which meant the default architecture skipped the
+        # glanceability gate entirely -- see finalize_display_text.
+        result.display_text = finalize_display_text(
+            result.stage1, config, origin="answer")
+        if config.two_stage:
+            say("      (using locally truncated stage 1 — compressor unavailable)")
     else:
         # The lens gets a short, fixed line. The previous behaviour put the
         # raw exception on the glasses, and a realistic 401 rendered as:
