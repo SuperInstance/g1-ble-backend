@@ -70,8 +70,29 @@ EVENT_WEIGHTS: dict[str, float] = {
 # weight -- a drill that found nothing says something about how detail is
 # generated, not about the subject matter. Mixing them into EVENT_WEIGHTS
 # would corrupt the relevance estimate.
+#
+# `drill_miss` and `drill_deferred` are SEPARATE kinds and must stay that way.
+# They look alike from the outside -- a wearer taps for detail and gets none --
+# and they mean opposite things:
+#
+#   drill_miss      we TRIED and there was nothing worth showing
+#   drill_deferred  we never tried; policy said not to bother
+#
+# Recording a deferral as a miss labels the unknown as a failure. It also makes
+# the metric that decides the policy circular: while detail_generation is off,
+# every tap is a deferral, so drill_miss_rate reads 1.0 and flips the axis on
+# using evidence that is an artefact of the axis being off. The axis would
+# then be "justified" by the very deferrals it caused. Splitting the kinds
+# makes drill_miss_rate honest while it is off -- which is to say, unmeasurable,
+# which is the correct state for a metric with no data.
+#
+# The deadlock that creates is real and deliberate: with no labels and no
+# misses to observe, detail_generation cannot turn itself on from evidence
+# alone. Breaking it requires a manual override (main.py --set-policy) or a
+# shadow mode that generates detail nobody sees. Both are decisions, not bugs.
 OBSERVATION_KINDS = frozenset({
-    "drill_miss",     # tapped for detail, none available
+    "drill_miss",     # tapped for detail, we generated some, none was worth showing
+    "drill_deferred", # tapped for detail, policy said not to generate any
     "repaired",       # stage 2 output failed the glanceability gate and was repaired
     "shown",          # placed on the lens
     "suppressed",     # filtered before ever reaching the lens

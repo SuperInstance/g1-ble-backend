@@ -197,26 +197,41 @@ named *before* the data exists.
 ```bash
 python main.py --policy-axes                    # every axis, options, deciding metric
 python main.py --policy                         # what is resolved, what is still open
+python main.py --evidence                       # which metrics are real, which have no source
 python main.py --set-policy g1_model=on         # pin one by hand; persists
 ```
 
-| axis | options | default | settled by |
-|---|---|---|---|
-| `examination_source` | `touchbar` / `head_up` / `both` | `touchbar` | ρ = θ/A_b ≥ 1.6 from the calibration walk |
-| `g1_model` | `on` / `off` | `off` | `queue_worth_rate` ≥ 0.5 over ≥100 review labels |
-| `interrupt_gate` | `rules` / `learned` | `rules` | ≥299 clean pushes |
-| `detail_generation` | `off` / `on` | `off` | `drill_miss_rate` ≥ 0.30 |
-| `push_enabled` | `off` / `on` | `off` | a full fortnight of tier labels |
+| axis | options | default | settled by | source today |
+|---|---|---|---|---|
+| `examination_source` | `touchbar` / `head_up` / `both` | `touchbar` | ρ = θ/A_b ≥ 1.6 from the calibration walk | none |
+| `g1_model` | `on` / `off` | `off` | `queue_worth_rate` ≥ 0.5 over ≥100 review labels | none |
+| `interrupt_gate` | `rules` / `learned` | `rules` | ≥299 clean pushes | none |
+| `detail_generation` | `off` / `on` | `off` | `drill_miss_rate` ≥ 0.30 | **the ledger** |
+| `push_enabled` | `off` / `on` | `off` | a full fortnight of tier labels | none |
 
 **Safety property, tested:** with zero evidence every axis holds its
 conservative default. An axis cannot be switched on by opinion.
 
-`detail_generation` is already wired into the live path — with the default, a
-tap logs `drill_miss` and does not start a generation. That is the point: the
-system takes a tap it cannot yet serve, writes down that it happened, and lets
-the log decide.
+**The honest state, since `main.py --evidence` reports it:** exactly one of
+these five has a data source in shipped code. `detail_generation` reads
+`drill_miss_rate` from the real ledger; the other four need *labels* — a human
+or trusted judge saying whether an interruption was correct — and nothing
+ships that produces one. `sim/ledger.py` has a `label()` function, called only
+from `experiments/soak.py` against a virtual wearer. So "the axes calibrate at
+install" is a design intent that is not implemented yet, and `--evidence` says
+so in one command rather than leaving it to be discovered.
 
-Design: **[policy.py](policy.py)** · tests: **[experiments/policy_axes.py](experiments/policy_axes.py)**
+One metric needed fixing to make that table truthful. A deferred drill used to
+be recorded as `drill_miss` — the wearer tapped and got nothing, so it looked
+like a miss. But while the axis is off *every* tap is deferred, so the rate
+read 1.0 and switched the axis on using evidence manufactured by the deferral
+it caused. `drill_miss` (we tried, there was nothing) and `drill_deferred` (we
+never tried) are now distinct events, and only the first counts. The cost is a
+deliberate deadlock: with the axis off there are no misses to observe, so it
+cannot turn itself on from evidence alone. Breaking that needs an override or
+a shadow mode — a decision, not a bug.
+
+Design: **[policy.py](policy.py)** · tests: **[experiments/policy_axes.py](experiments/policy_axes.py)** · [documents/20](documents/20-evidence-bridge.md)
 
 ---
 
@@ -234,6 +249,7 @@ Everything here is reproducible and every number is computed from a real run.
 .venv/bin/python experiments/interrupt_gate.py   # push-vs-queue: silence, budget, ordering
 .venv/bin/python experiments/wiring_audit.py     # nothing advertised is left unwired (fails the build)
 .venv/bin/python main.py --queue --queue-dir .   # dry-run the interrupt decision on a spool
+.venv/bin/python main.py --evidence              # which policy metrics are real, and which have no source
 
 ollaya serve                                   # required for the two below
 .venv/bin/python experiments/score_corpus.py   # winnow discrimination over 40 candidates
@@ -363,6 +379,17 @@ for c in EventGenerator(seed=1).day(datetime(2026,10,16), count=60):
 - Glanceability discrimination against a frozen regex baseline.
 - Gait simulation: the ρ cliff and the debounce constants.
 - Walking-tier CPU cost; the absence of BlueZ on this host.
+- The push-vs-queue decision: silence by default, the budget binding a batch,
+  and the ordering, all offline with no radio (`experiments/interrupt_gate.py`).
+
+**Implemented but never exercised on the physical path:**
+
+- The interrupt decision itself. `interrupt.py` is complete, tested and dry-run
+  only — **nothing ships that sends a push.** `main.py --queue` prints what it
+  would do. The BLE half of an interruption has never run.
+- The learning ledger's effect on anything. `drill_miss_rate` is the one policy
+  metric with a real source; the other four have none
+  ([documents/20](documents/20-evidence-bridge.md)).
 
 **Assumed, never tested — everything about the physical glasses:**
 
@@ -406,6 +433,7 @@ corrections are kept visible rather than quietly edited:
 | 17 | [JEV and JEPA: what transfers](documents/17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
 | 18 | [Personalisation, measured](documents/18-personalisation-measured.md) | The A/B, the verdict, and the removal — including a third injection site that was never wired to anything. |
 | 19 | [The wiring audit](documents/19-wiring-audit.md) | What is described as working and is not: the dormant plugin seam, a gate that stopped running, and a decision function that did not exist. |
+| 20 | [The evidence bridge](documents/20-evidence-bridge.md) | Why the policy could not change, a metric that measured its own deferrals, and absent-is-not-zero. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.

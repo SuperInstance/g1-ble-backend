@@ -30,6 +30,7 @@ changed* is more useful than a clean final story.
 | 17 | [JEV and JEPA: what transfers](17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
 | 18 | [Personalisation, measured](18-personalisation-measured.md) | The A/B finally run, the verdict, and the removal — including a third injection site that was never wired to anything. |
 | 19 | [The wiring audit](19-wiring-audit.md) | What is described as working and is not: the dormant plugin seam, a gate that stopped running, and a decision function that did not exist. |
+| 20 | [The evidence bridge](20-evidence-bridge.md) | Why the policy could not change, a metric that measured its own deferrals, and absent-is-not-zero. |
 
 The synthesised design is [`../DESIGN.md`](../DESIGN.md).
 

@@ -222,20 +222,40 @@ class Verdict:
 @dataclass
 class Budget:
     """
-    Pushes already spent. Mutable because a batch spends it as it goes.
+    Pushes already spent, plus whatever evidence exists. Mutable because a
+    batch spends the push budget as it goes.
 
     The counters are the SAME ones policy._resolve_push_enabled reads. They
     are tracked here rather than recomputed from the ledger because the queue
     has to decide a whole batch, and asking "what is left" five times against
     a ledger that will not record any of them yet is not a question with a
     useful answer.
+
+    THE TWO KINDS OF ZERO, which are not the same thing:
+
+      pushes_today / pushes_last_hour  default to 0, and 0 is TRUE. Nothing
+                                       has been pushed. There is no push path
+                                       yet, and "none spent" is an honest
+                                       reading of that.
+
+      label_days / clean_pushes / ...  default to None, and None means
+                                       "no source exists". Not 0. A fabricated
+                                       0 would let a reader conclude an axis
+                                       had been evaluated and found wanting,
+                                       when the truth is that it was never
+                                       evaluated at all.
+
+    `evidence()` omits the None ones entirely, so policy.resolve() sees them as
+    missing and marks those axes unresolved -- which is the documented
+    behaviour for absent metrics, rather than a silent zero passing as a
+    measurement.
     """
 
     pushes_today: int = 0
     pushes_last_hour: int = 0
-    label_days: int = 0
-    clean_pushes: int = 0
-    n_labels: int = 0
+    label_days: Optional[int] = None
+    clean_pushes: Optional[int] = None
+    n_labels: Optional[int] = None
     queue_worth_rate: Optional[float] = None
     rho: Optional[float] = None
     drill_miss_rate: Optional[float] = None
@@ -254,15 +274,26 @@ class Budget:
         """
         return {
             "push_enabled": {
-                "label_days": self.label_days,
                 "pushes_today": self.pushes_today,
                 "pushes_last_hour": self.pushes_last_hour,
+                # Omitted when None: see the class docstring. A present key
+                # with a None value would reach `days >= 14` as a TypeError,
+                # and a zero would be a lie.
+                **({"label_days": self.label_days}
+                   if self.label_days is not None else {}),
             },
-            "interrupt_gate": {"clean_pushes": self.clean_pushes},
-            "g1_model": {"n_labels": self.n_labels,
-                         "queue_worth_rate": self.queue_worth_rate},
-            "examination_source": {"rho": self.rho},
-            "detail_generation": {"drill_miss_rate": self.drill_miss_rate},
+            "interrupt_gate": ({"clean_pushes": self.clean_pushes}
+                               if self.clean_pushes is not None else {}),
+            "g1_model": {
+                **({"n_labels": self.n_labels}
+                   if self.n_labels is not None else {}),
+                **({"queue_worth_rate": self.queue_worth_rate}
+                   if self.queue_worth_rate is not None else {}),
+            },
+            "examination_source": ({"rho": self.rho}
+                                   if self.rho is not None else {}),
+            "detail_generation": ({"drill_miss_rate": self.drill_miss_rate}
+                                  if self.drill_miss_rate is not None else {}),
         }
 
     def spend(self, now: datetime) -> None:
@@ -374,6 +405,81 @@ def plan(
         budget.spend(now)
 
     return verdicts
+
+
+def evidence_from_store(store) -> tuple["Budget", dict]:
+    """
+    Derive a :class:`Budget` from a real :class:`memory.FeedbackStore`.
+
+    This is the bridge that was missing. Every axis in ``policy.py`` names a
+    deciding metric, and until now nothing computed any of them from the
+    shipped ledger, so every axis resolved to its conservative default
+    forever and there was no path by which the policy could ever change.
+    That is why ``detail_generation`` was the only load-bearing axis: it was
+    the only one whose value anything read, not the only one with evidence.
+
+    THE RULE THAT MATTERS HERE: absent is not zero.
+
+    ``label_days`` with no labelling UI is not ``0 days collected``; it is
+    "no source exists". The two resolve to the same axis value today, but
+    they mean opposite things to a reader, and only one of them is true. A
+    fabricated zero is the more dangerous of the two because it looks like a
+    measurement and would let someone conclude the axis had been evaluated
+    and found wanting, rather than never evaluated at all. So metrics with no
+    source are left ABSENT from the dict, which is what ``policy.resolve()``
+    documents as "unresolved -- never guessed".
+
+    Returns ``(budget, provenance)`` where provenance maps each metric name to
+    ``"derived"`` or ``"no source"``, so a caller -- or ``--evidence`` -- can
+    show which numbers are real.
+    """
+    prov: dict[str, str] = {}
+
+    def mark(name: str, value=None, source: bool = True):
+        prov[name] = "derived" if source else "no source"
+
+    # -- drill_miss_rate: THE ONE METRIC WITH A REAL SOURCE ---------------
+    #
+    # Derived as misses over (misses + real drills). `drill_deferred` is
+    # excluded by construction, since it is a different event kind now. A
+    # rate with zero denominator is NOT 0.0 -- it is unmeasurable, and
+    # returning 0.0 would say "drills always succeed" when the truth is
+    # "no drill has been judged yet".
+    try:
+        counts = store.counts()
+    except Exception as exc:                       # noqa: BLE001
+        log.warning("could not read store counts: %s", exc)
+        counts = {}
+
+    miss = int(counts.get("drill_miss", 0) or 0)
+    expand = int(counts.get("expand", 0) or 0)
+    judged = miss + expand
+    budget = Budget()
+    if judged:
+        budget.drill_miss_rate = miss / judged
+        mark("drill_miss_rate")
+    else:
+        mark("drill_miss_rate", None, source=False)
+
+    # -- push budget: the count of what actually happened ------------------
+    #
+    # With no shipped push path there is nothing to count, and the counters
+    # stay at zero so the budget constraint reads "nothing spent yet" rather
+    # than blocking. That is the correct default and NOT a measurement.
+    prov["pushes_today"] = "derived" if counts.get("shown") else "no push path"
+
+    # -- the four with no source at all ------------------------------------
+    #
+    # Every one of these needs LABELS: a human or a trusted judge saying
+    # "this card was/was not worth interrupting me for". `sim/ledger.py` has
+    # `label()` and it is called only by experiments/soak.py, against a
+    # VirtualWearer. There is no CLI that produces a label and no shipped code
+    # that reads one. Until both exist these stay absent on purpose.
+    for name in ("label_days", "clean_pushes", "n_labels", "queue_worth_rate",
+                 "rho"):
+        prov[name] = "no source"
+
+    return budget, prov
 
 
 def summarize(verdicts: list[Verdict]) -> dict:

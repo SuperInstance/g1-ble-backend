@@ -190,6 +190,78 @@ def main() -> int:
     check("candidate survives as_json -> from_json",
           restored == original, f"{restored.cls}/{restored.elapsed_s}s")
 
+    print("\n8. evidence derived from a real ledger")
+    import tempfile as _tf
+    from memory import FeedbackStore
+
+    with _tf.TemporaryDirectory() as tmp:
+        store = FeedbackStore(Path(tmp) / "e.db")
+
+        def card():
+            return store.add_card(query="q", stage1="x" * 300,
+                                  summary="s", keywords=["k"]).id
+
+        # Four deferrals, no judged drill. The rate must be ABSENT, not 0.0:
+        # 0.0 would say "drills always succeed", which is a claim about a
+        # population that does not exist.
+        for _ in range(4):
+            store.add_event(card(), "drill_deferred", "detail_generation=off")
+        b1, p1 = q.evidence_from_store(store)
+        check("CONTROL: the ledger really holds 4 deferrals",
+              store.counts().get("drill_deferred") == 4)
+        check("deferrals do NOT produce a drill_miss_rate",
+              b1.drill_miss_rate is None,
+              f"got {b1.drill_miss_rate}, want absent")
+        check("'drill_miss_rate' is omitted from the evidence dict",
+              "drill_miss_rate" not in b1.evidence().get("detail_generation", {}),
+              str(b1.evidence().get("detail_generation")))
+
+        # One real drill, one miss -> a real, derivable rate of 0.5.
+        store.add_event(card(), "expand", "touchbar/tap")
+        store.add_event(card(), "drill_miss", "generated but nothing worth it")
+        b2, _ = q.evidence_from_store(store)
+        check("a judged drill set produces a real rate",
+              b2.drill_miss_rate == 0.5, f"{b2.drill_miss_rate} (1 miss / 2)")
+
+        print("\n9. absent is not zero")
+        b3, prov3 = q.evidence_from_store(store)
+        ev3 = b3.evidence()
+        for metric in ("label_days", "clean_pushes", "n_labels",
+                       "queue_worth_rate", "rho"):
+            present = any(metric in m for m in ev3.values())
+            check(f"{metric} is ABSENT, not reported as 0",
+                  not present and prov3.get(metric) == "no source",
+                  f"present={present} prov={prov3.get(metric)}")
+        check("push counters ARE zero, because that is true",
+              ev3["push_enabled"]["pushes_today"] == 0
+              and ev3["push_enabled"]["pushes_last_hour"] == 0)
+
+        # The decisive one: an absent metric must not flip an axis.
+        from policy import resolve
+        resolved = resolve(b3.evidence())
+        no_source_axes = ("push_enabled", "g1_model", "interrupt_gate",
+                          "examination_source")
+        check("axes with NO SOURCE stay unresolved",
+              all(not resolved.decisions[a].enough_evidence
+                  for a in no_source_axes),
+              f"unresolved={resolved.unresolved()}")
+        # The counterweight, and the actual finding: drill_miss_rate is the
+        # ONE metric with a real ledger source, so detail_generation is the
+        # ONE axis that can move off its default from shipped data alone.
+        check("the one axis with a real source is the one that resolves",
+              resolved.decisions["detail_generation"].enough_evidence,
+              f"detail_generation -> {resolved.get('detail_generation')} "
+              f"({resolved.evidence_for('detail_generation').reason})")
+        check("an axis with no source does not read as measured-and-low",
+              not resolved.evidence_for("push_enabled").enough_evidence,
+              resolved.evidence_for("push_enabled").reason)
+
+        # A label_days of 0 supplied on purpose is a different claim from None.
+        b4 = q.Budget(label_days=0)
+        check("explicit 0 IS reported, and reads as 'not enough days'",
+              b4.evidence()["push_enabled"].get("label_days") == 0)
+        store.close()
+
     print()
     print(f"summary: {q.summarize(q.plan(mixed, budget=q.Budget(label_days=20), now=NOW))}")
     print()

@@ -275,9 +275,16 @@ class Session:
         # the unchanged text back as though something had happened. Say so in
         # the cheapest way available -- the text already on the lenses.
         if not self.policy.on("detail_generation"):
-            await self._record(top.card.id, "drill_miss", "deferred-by-policy")
+            # drill_deferred, NOT drill_miss. They are different events and
+            # conflating them is not a naming quibble: drill_miss_rate is the
+            # metric that decides this very axis, so recording deferrals as
+            # misses means that while the axis is off the rate reads 1.0 and
+            # the policy justifies itself with the deferrals it caused. See
+            # memory.OBSERVATION_KINDS.
+            await self._record(top.card.id, "drill_deferred", "detail_generation=off")
             log.info("drill-down deferred: policy detail_generation=off "
-                     "(drill_miss recorded; the log decides)")
+                     "(drill_deferred recorded — not a miss, so it does not "
+                     "count toward drill_miss_rate)")
             try:
                 await self.send("Detail not ready. Tap again later.")
             except Exception as exc:  # pragma: no cover - defensive

@@ -531,6 +531,44 @@ async def run(args: argparse.Namespace) -> int:
         store.close()
         return 0
 
+    if args.evidence:
+        import interrupt as interrupt_mod
+        from memory import FeedbackStore as EvidenceStore
+        from policy import load as load_policy
+
+        store = EvidenceStore(args.store)
+        budget, prov = interrupt_mod.evidence_from_store(store)
+        pol = load_policy()
+
+        print("Policy evidence — what the ledger can and cannot say\n")
+        print(f"  ledger      {store.path}")
+        c = store.counts()
+        print(f"  {c.get('cards', 0)} cards, {c.get('events', 0)} events")
+        print(f"  drill_miss      {c.get('drill_miss', 0)}")
+        print(f"  drill_deferred  {c.get('drill_deferred', 0)}"
+              f"   (excluded from the rate by design)")
+        print(f"  expand          {c.get('expand', 0)}")
+
+        values = budget.evidence()
+        # The same nested shape resolve() consumes, so this table cannot drift
+        # from what the policy actually sees. Iterated over PROVENANCE, not
+        # over the evidence dict, precisely so a metric with no source still
+        # appears as "—" instead of silently disappearing from the report.
+        print(f"\n  {'metric':<20}{'source':<14}value")
+        print(f"  {'-' * 52}")
+        for axis_id, metrics in values.items():
+            for metric, value in metrics.items():
+                print(f"  {metric:<20}{prov.get(metric, 'derived'):<14}{value}")
+        for metric in ("label_days", "clean_pushes", "n_labels",
+                       "queue_worth_rate", "rho"):
+            if not any(metric in m for m in values.values()):
+                print(f"  {metric:<20}{prov.get(metric, 'no source'):<14}"
+                      f"—  <-- ABSENT, not zero")
+
+        print(f"\n  policy as resolved:\n{_indent(pol.report(), '    ')}")
+        store.close()
+        return 0
+
     if args.queue_dir or args.queue:
         import interrupt as queue_mod
         from policy import load as load_policy
@@ -868,6 +906,12 @@ def build_parser() -> argparse.ArgumentParser:
              "by default: measured 9-13x slower at identical answer relevance "
              "and no measured protection against invented numbers. Turn this "
              "on to compare, or to fall back if one-stage quality regresses.",
+    )
+    parser.add_argument(
+        "--evidence", action="store_true",
+        help="show which policy metrics can be derived from the ledger, "
+             "which have no source yet, and how each axis resolves. This is "
+             "the honest answer to 'why is the policy not changing?'.",
     )
     parser.add_argument(
         "--queue", action="store_true",

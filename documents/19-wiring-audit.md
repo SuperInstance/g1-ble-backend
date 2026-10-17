@@ -174,6 +174,13 @@ Recorded but deliberately not changed:
   already tracked in `.context/ble.md`; the audit independently rediscovered it,
   which is mild evidence the tracking is in the right place.
 
+An audit finds what is wrong. It is much less useful at deciding what should
+be *built*, and that limit showed up immediately: the same pass that listed ten
+dead functions could not say which of them mattered. The two that turned out to
+matter — a gate that had stopped running, and a decision function that did not
+exist — were not the biggest entries in that list. `next_seq()` has a longer,
+more confident docstring than the glanceability gate ever did.
+
 ## What this says about the project
 
 Three of the six HIGH findings were **stale residue of a change I had made in
@@ -194,14 +201,16 @@ rule this document should end on:
 
 ## Known open items
 
-- **The ledger is not wired to the interrupt decision.** `push_enabled` needs
-  14 days of tier labels; labels are written only by `sim/`, and no CLI
-  produces one. `interrupt.py` takes a `Budget` from its caller, and no caller
-  builds one from `FeedbackStore`. That is the next real increment, and without
-  it no axis can ever leave its default.
-- **`detail_generation` is rigged by its own default.** With the axis off,
-  every drill tap records `drill_miss`, so the metric that would flip it reads
-  100% by construction. One axis of five is load-bearing, and it is the one
-  that cannot be measured while it is off.
+- ~~**The ledger is not wired to the interrupt decision.**~~ **Half closed in
+  [20](20-evidence-bridge.md).** `interrupt.evidence_from_store()` now derives
+  what the ledger can support and `main.py --evidence` reports it. The result
+  is that exactly one of five axes — `detail_generation`, via `drill_miss_rate`
+  — has a real source. The other four need labels, and no shipped code
+  produces or reads one. That is a product decision, not a code gap.
+- ~~**`detail_generation` is rigged by its own default.**~~ **Corrected, and
+  the original description here was backwards.** It does not get stuck; it
+  flips *on*, on evidence manufactured by its own deferrals. documents/20
+  splits `drill_deferred` from `drill_miss` so the metric stops measuring the
+  deferral.
 - **`next_seq()`** — hardware question, above.
 - **`jev_gate.py`** — blocked on a real `apikey_…` key.
