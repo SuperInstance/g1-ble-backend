@@ -497,6 +497,13 @@ class FeedbackStore:
                 gate         TEXT    NOT NULL DEFAULT '',
                 reason       TEXT    NOT NULL DEFAULT '',
                 observable   INTEGER NOT NULL DEFAULT 1,
+                -- 1 when this decision came from a DRY RUN and was never sent
+                -- to a face. It still carries content evidence (a human can
+                -- say whether the text was worth interrupting for) but it is
+                -- NOT evidence that the system pushed cleanly -- the same
+                -- argument documents/21 makes about queued rows counting
+                -- toward clean_pushes.
+                dry_run      INTEGER NOT NULL DEFAULT 0,
                 label        INTEGER CHECK (label IN (0,1)),
                 already_know INTEGER CHECK (already_know IN (0,1)),
                 reviewed_at  REAL
@@ -1138,7 +1145,7 @@ class FeedbackStore:
     def record_decision(self, *, decision: str, cls: str,
                         source: str = "", line: str = "",
                         gate: str = "", reason: str = "",
-                        observable: bool = True,
+                        observable: bool = True, dry_run: bool = False,
                         ts: Optional[float] = None) -> int:
         """
         Record that a candidate was JUDGED, pushed or not.
@@ -1158,9 +1165,10 @@ class FeedbackStore:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO decisions (created_at, decision, cls, source, "
-                "line, gate, reason, observable) VALUES (?,?,?,?,?,?,?,?)",
+                "line, gate, reason, observable, dry_run) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (now, decision, cls, source, line[:120], gate, reason[:200],
-                 1 if observable else 0),
+                 1 if observable else 0, 1 if dry_run else 0),
             )
             row = int(cur.lastrowid)
         # Explicit commit, like add_card/add_event/set_meta above.
@@ -1254,14 +1262,23 @@ class FeedbackStore:
             pushed = self._conn.execute(
                 "SELECT label, already_know FROM decisions "
                 "WHERE decision = 'push' AND label IS NOT NULL "
+                "AND dry_run = 0 "
                 "ORDER BY reviewed_at, id"
             ).fetchall()
+            # Count EVERY labelled row for n_labels, dry-run pushes included.
+            # A human answered those questions; that is real ground truth about
+            # the CONTENT and it is what g1_model's volume gate counts. The
+            # dry-run exclusion applies only to clean_pushes, where the claim
+            # is "we pushed and were right", and a dry run pushed nothing.
+            labelled_any = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM decisions WHERE label IS NOT NULL"
+            ).fetchone()["n"]
             days = self._conn.execute(
                 "SELECT COUNT(DISTINCT date(created_at, 'unixepoch')) AS d "
                 "FROM decisions WHERE label IS NOT NULL"
             ).fetchone()["d"]
 
-        n_labels = len(queued) + len(pushed)
+        n_labels = int(labelled_any or 0)
         worth = (sum(r["label"] for r in queued) / len(queued)) if queued else None
 
         # Streak: walk the pushes newest-first until one is false. An item

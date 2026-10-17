@@ -727,6 +727,34 @@ class LinkStatus:
                       f"heartbeat {self.heartbeat_age_s:.1f}s old")
 
 
+def record_verdict(store, verdict: "Verdict", *, observable: bool = True,
+                   dry_run: bool = False) -> int:
+    """
+    Write one decision to the ledger so a human can label it later.
+
+    The bridge between "the system decided" and "somebody eventually judges
+    it". Without it the review loop has nothing to show and an empty ledger
+    looks exactly like a system that has judged nothing -- which is not the
+    same as a system whose queue is worthless.
+
+    `observable` is the CENSORING flag, not a nicety. When the link was down
+    the wearer cannot have reacted, so the decision is recorded as
+    unobservable and `--review` refuses to label it: a link drop is
+    censoring, not a negative label (documents/22).
+    """
+    c = verdict.candidate
+    return store.record_decision(
+        decision=verdict.action,
+        cls=c.cls,
+        source=c.source,
+        line=c.line,
+        gate=verdict.gate,
+        reason=verdict.reason,
+        observable=observable,
+        dry_run=dry_run,
+    )
+
+
 def summarize(verdicts: list[Verdict]) -> dict:
     """Counts per gate — the shape a soak report wants."""
     out: dict[str, int] = {"push": 0, "queue": 0}

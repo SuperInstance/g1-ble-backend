@@ -368,6 +368,65 @@ def main() -> int:
               f"{before} before settle, {after} after -- budget is spent on "
               f"ATTEMPT, not on success")
         bstore.close()
+    print("\n12. the whole loop closes: decide -> record -> label -> evidence")
+    # The point: the policy layer has never had an input it did not have to
+    # fake. n_labels / label_days / queue_worth_rate all read "no source" until
+    # somebody labels something, and this is the path that makes them derived.
+    with _tf.TemporaryDirectory() as tmp:
+        loop_store = FeedbackStore(Path(tmp) / "loop.db")
+        verds = q.plan([meeting(5), blocked(600), device(4), meeting(99)],
+                       budget=q.Budget(label_days=20), now=NOW)
+        before, _ = q.evidence_from_store(loop_store)
+        check("CONTROL: with nothing labelled, the label metrics are ABSENT",
+              before.n_labels is None and before.queue_worth_rate is None,
+              f"n_labels={before.n_labels} worth={before.queue_worth_rate}")
+
+        for v in verds:
+            q.record_verdict(loop_store, v, dry_run=True)
+        pending = loop_store.unlabelled()
+        check("every decision is queued for review",
+              len(pending) == len(verds), f"{len(pending)}/{len(verds)}")
+
+        # Label EXPLICITLY rather than by position. The first version took the
+        # first three rows and asserted a rate of 2/3, which was wrong:
+        # rank() orders by urgency, so the ineligible meeting(99) lands second
+        # and the positional slice picked a different set than assumed. The
+        # metric was right; the test's picture of the ordering was not.
+        queued_rows = [r for r in pending if r["decision"] == "queue"]
+        pushed_rows = [r for r in pending if r["decision"] == "push"]
+        for row in queued_rows:
+            loop_store.set_label(row["id"], 0)      # queue was not worth it
+        for row in pushed_rows:
+            loop_store.set_label(row["id"], 1)      # pushes were fine
+
+        after, _ = q.evidence_from_store(loop_store)
+        stats_after = loop_store.label_stats()
+        check("after labelling, the metrics become DERIVED, not absent",
+              after.n_labels == len(pending) and after.queue_worth_rate is not None,
+              f"n_labels={after.n_labels} worth={after.queue_worth_rate}")
+        check("queue_worth_rate is the mean over QUEUED rows ONLY",
+              after.queue_worth_rate == 0.0
+              and stats_after['queue_labelled'] == len(queued_rows)
+              # push_labelled counts REAL sends only, so the dry-run pushes
+              # correctly contribute 0. That is the assertion.
+              and stats_after['push_labelled'] == 0
+              and len(pushed_rows) > 0,
+              f"worth={after.queue_worth_rate} from "
+              f"{stats_after['queue_labelled']} "
+              f"queued rows; {len(pushed_rows)} dry-run pushes correctly "
+              f"contributed 0, "
+              f"contribute")
+        check("clean_pushes still ABSENT -- none of these pushes was the "
+              "result of a real send",
+              after.clean_pushes is None, f"{after.clean_pushes}")
+
+        censored = q.Verdict(meeting(5), "push", "eligible", "eligible")
+        q.record_verdict(loop_store, censored, observable=False)
+        check("a push made with the link down is recorded unlabelable",
+              any(not r["observable"] for r in loop_store.unlabelled()),
+              "censoring applies to PUSHES, not to terminal review")
+        loop_store.close()
+
     print()
     if FAILURES:
         for f in FAILURES:

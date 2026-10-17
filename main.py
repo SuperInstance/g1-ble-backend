@@ -732,8 +732,10 @@ async def run(args: argparse.Namespace) -> int:
 
     if args.queue_dir or args.queue:
         import interrupt as queue_mod
+        from memory import FeedbackStore as QueueStore
         from policy import load as load_policy
 
+        store = QueueStore(args.store)
         pol = load_policy()
         cands = queue_mod.load_outbox(
             Path(args.queue_dir) if args.queue_dir else queue_mod.OUTBOX)
@@ -793,6 +795,39 @@ async def run(args: argparse.Namespace) -> int:
                 if v.gate == "eligibility":
                     print(f"    ineligible: {v.candidate.source} — {v.reason}")
         print(f"\n  {queue_mod.summarize(verdicts)}")
+
+        # Record what was decided. Without this the ledger stays empty and an
+        # empty ledger is indistinguishable from a system that has judged
+        # nothing -- which is the difference between "no labels yet" and
+        # "the queue is useless", and the review loop has nothing to show.
+        #
+        # Only if asked. A dry run that silently writes to the ledger is a
+        # dry run nobody trusts, and this is the surface where that trust is
+        # earned or lost.
+        if args.queue_record:
+            recorded = 0
+            for v in verdicts:
+                # observable=True regardless of `link_ok`, and the reason
+                # matters: `link_ok` is False here because a DRY RUN HAS NO
+                # RADIO, which is not the same as "the link was down when this
+                # was shown". Confusing the two made every dry-run decision
+                # unlabelable and quietly disconnected the review loop from
+                # the only thing that populates it.
+                #
+                # The censoring guard applies to PUSHES, where the wearer was
+                # supposed to see something and could not. --review judges
+                # CONTENT on a terminal, and a human reading the text does not
+                # need the glasses to have been on their face.
+                queue_mod.record_verdict(store, v, observable=True,
+                                        dry_run=True)
+                recorded += 1
+            print(f"\n  recorded {recorded} decisions to {store.path}")
+            print("  review them with:  main.py --review")
+        else:
+            print("\n  nothing recorded. Add --queue-record to write these "
+                  "decisions to the ledger for review.")
+
+        store.close()
         return 0
 
     if args.policy:
@@ -1135,6 +1170,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--queue-dir", default=None, metavar="DIR",
         help="read candidates from DIR instead of ~/.g1/outbox. Pairs with "
              "--queue; useful for replaying a captured spool.",
+    )
+    parser.add_argument(
+        "--queue-record", action="store_true",
+        help="with --queue, write each decision to the ledger so --review "
+             "can put a human label on it. OFF by default: a dry run that "
+             "silently writes to the ledger is a dry run nobody trusts.",
     )
     parser.add_argument(
         "--queue-label-days", type=int, default=0, metavar="N",
