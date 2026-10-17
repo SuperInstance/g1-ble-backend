@@ -52,6 +52,23 @@ def main() -> int:
         print("\n  SAFETY: with zero evidence every axis holds its conservative "
               "default. No axis was switched on by opinion.")
 
+    # Budget is a CONSTRAINT evaluated inside the predicate, not downstream.
+    # Evidence and budget are different kinds of input; before this, a spent
+    # budget could not stop an axis that evidence had already turned on.
+    print()
+    budget_cases = [
+        ({"label_days": 30}, "on", "30 days of labels, budget clear"),
+        ({"label_days": 30, "pushes_today": 4}, "off", "4/4 daily used"),
+        ({"label_days": 30, "pushes_last_hour": 2}, "off", "2/2 hourly used"),
+        ({"label_days": 3, "pushes_today": 4}, "off",
+         "budget spent before milestone even completes"),
+    ]
+    for ev, want, label in budget_cases:
+        got = resolve({"push_enabled": ev}).get("push_enabled")
+        ok = got == want
+        fails += not ok
+        print(f"  BUDGET {label:<44} -> {got!r} {'ok' if ok else f'FAIL want {want!r}'}")
+
     # Manual override must be honoured and validated.
     p = resolve({}, {"g1_model": "on"})
     ok = p.get("g1_model") == "on" and "override" in p.decisions["g1_model"].reason

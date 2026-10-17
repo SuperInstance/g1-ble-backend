@@ -184,6 +184,59 @@ Agreed by both convergence rounds:
 > establishes that the expensive path's stated benefit is **unsupported**, which
 > is a different and narrower claim.
 
+### External: RSI-Anything (arXiv:2610.13912), and why most of it does not apply
+
+The paper is real and serious (PhAI Labs, Ling Yang / Yingcheng Wu / Zhenfei
+Yin, 09 Oct 2026), and it closes the trio a local design note gestured at. Its
+headline results: code repair 26.3% → 29.2% → 31.2%, GUI actions −39.4%,
+lab planning 21.80% → 46.01%, reaction yield 96.15% vs 82.16%.
+
+**Most of it is dead on arrival here, for one reason: every result rests on a
+per-action, immediate, ground-truth outcome.** Code repair has a test suite, GUI
+has a programmatic checker, lab planning has a benchmark score, reaction
+optimisation has GC/LC-MS. **No result in the paper came from a sparse,
+delayed, unlabelled human signal**, which is the only signal this system has. A
+wearer tap is not an outcome label: it says "I looked", and says nothing at all
+about the far more important case where you pushed and they did not tap.
+
+Two corrections to the paper's own framing, worth having on file:
+
+- The lab-planning headline is **21.80 → 46.01**, but a strong reference
+  configuration scores **45.32**. The real margin is **+0.69 pp**, not +24.21.
+- §5 states outright that **joint multiround mutual improvement "is needed to
+  establish"** and is not shown. The compounding claim is not demonstrated.
+
+And the structural mismatch is sharper than any of it. The paper ranks
+*candidates* — four proposed revisions, one executed. This system's decision is
+*binary* over ~24 opportunities a day at a base rate of 4: there is no candidate
+pool to rank and no partial credit to earn. Worse, their objective is the
+opposite shape: the GUI result **rewards taking 39.4% fewer actions** and
+tolerates 21 wrong submissions in the adapted configuration. This design
+tolerates **zero** — one mis-fire auto-suspends a source class for 24 hours.
+A mechanism tuned for absorbing waste is the wrong shape for a system that
+cannot.
+
+Their cleanest selection experiment moved ranking accuracy 66.5% → 72.8% and
+bought **+2.83 pp, 95% CI [+0.17, +5.50]** — with a perfect verifier. This
+project already measured that a scorer at AUC 0.958 moves nothing, and the
+paper supplies no reason to revisit that.
+
+**What does transfer** is exactly one thing, and it has been adopted: in §2.5 the
+evaluation specification fixes "the task metrics, prediction checks,
+**constraints**, feedback allowance, and acceptance thresholds" together, rather
+than applying constraints downstream of a decision. The push budget (2/hour,
+4/day) previously existed only as prose in an axis rationale and was enforced
+elsewhere, so an axis could resolve `push_enabled=on` on the strength of evidence
+while the system was already out of budget. `policy.py` now evaluates it inside
+the predicate: `MAX_PUSHES_PER_HOUR` / `MAX_PUSHES_PER_DAY`, checked before
+evidence so a spent budget cannot be overridden by evidence. That discipline is
+independent of the world-model machinery and correct on its own terms.
+
+Everything else in the paper is a well-argued case for a setting this system is
+not in. Its own "insufficient evidence" third state (§2.4) is the one place it
+confirms what was already built here: `Decision.enough_evidence=False` →
+conservative default → `Policy.unresolved()`.
+
 ---
 
 ## 6. Milestone 1 — "spool to lens"

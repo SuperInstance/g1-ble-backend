@@ -50,6 +50,24 @@ RHO_CLEAN = 1.6
 # on the path that costs trust is a bad bet.
 CLEAN_PUSHES_TO_TRUST_LEARNING = 299
 
+# The push budget is a CONSTRAINT, not a preference, and it belongs inside the
+# acceptance predicate rather than downstream of it.
+#
+# Before this, the budget existed only as prose in an axis rationale ("4/day
+# cap") and was enforced elsewhere in the system. So an axis could resolve to
+# `push_enabled=on` on the strength of evidence while the system was already
+# out of budget -- evidence and constraint are different kinds of input and
+# only the first was reaching the decision.
+#
+# Form follows RSI-Anything (arXiv:2610.13912) section 2.5, which fixes "the
+# task metrics, prediction checks, constraints, feedback allowance, and
+# acceptance thresholds" as one specification evaluated together. That paper's
+# mechanism does not otherwise transfer here -- every one of its results rests
+# on a per-action ground-truth outcome, and this system has none -- but this
+# particular discipline is independent of that and correct on its own terms.
+MAX_PUSHES_PER_HOUR = 2
+MAX_PUSHES_PER_DAY = 4
+
 # Labels needed before any relevance weighting means anything at this volume
 # (~30 events/day, one wearer).
 MIN_LABELS_FOR_MODEL = 100
@@ -224,6 +242,23 @@ def _resolve_detail_generation(ev: dict) -> Decision:
 
 def _resolve_push_enabled(ev: dict) -> Decision:
     days = ev.get("label_days", 0)
+
+    # Constraint first. Being out of budget is not a matter of evidence, so it
+    # is checked before evidence and cannot be overridden by it. Reported as
+    # enough_evidence=False so it shows up as UNRESOLVED rather than as a
+    # decided axis: the budget is exhausted, not a judgement about trust.
+    spent_hour = int(ev.get("pushes_last_hour", 0) or 0)
+    spent_day = int(ev.get("pushes_today", 0) or 0)
+    if spent_day >= MAX_PUSHES_PER_DAY:
+        return Decision("push_enabled", "off",
+                        f"{spent_day}/{MAX_PUSHES_PER_DAY} daily pushes used; "
+                        f"budget exhausted regardless of evidence", ev, False)
+    if spent_hour >= MAX_PUSHES_PER_HOUR:
+        return Decision("push_enabled", "off",
+                        f"{spent_hour}/{MAX_PUSHES_PER_HOUR} hourly pushes "
+                        f"used; budget exhausted regardless of evidence",
+                        ev, False)
+
     if days >= 14:
         return Decision("push_enabled", "on",
                         f"{days} days of tier labels collected", ev, True)
