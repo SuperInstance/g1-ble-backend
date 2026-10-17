@@ -80,13 +80,13 @@ DEFAULTS: dict[str, Any] = {
     "trust_gain_good": 0.055,
     "trust_drift_per_day": 0.03,
     # --- diminishing returns within a topic ---
-    "repeat_base": 0.74,          # each re-sighting is worth this fraction
+    "repeat_base": 0.80,          # each re-sighting *today* is worth this fraction
     "expand_satiation": 0.45,     # each *expansion* costs this much more
     "recency_recovery": 0.32,     # a boring subject is interesting again after a day
     # --- the already-knew case ---
     "known_penalty": 0.45,        # utility removed when I already have this
     "redundancy_compound": 0.30,  # each restatement adds to the annoyance
-    "recognition_miss_rate": 0.22,  # I do NOT notice redundancy straight away
+    "recognition_miss_rate": 0.35,  # I do NOT notice redundancy straight away
     # --- glance / gaze ---
     "notice_base": 0.62,          # do I even register a peripheral head-up cue
     "notice_habituation": 0.11,   # per head-up: the cue stops meaning anything
@@ -136,6 +136,7 @@ class VirtualWearer:
         self._known_topics: dict[str, int] = {}     # topic -> times laptop told me
         self._topic_hist: dict[str, dict] = {}      # topic -> seen/expands/last
         self._lens: dict[str, dict] = {}            # display_text -> legible/value
+        self._observed: set = set()            # (ts, line) pairs already counted
 
         # ---- counters for report() ----------------------------------------
         self._n_seen = self._n_shown = self._n_interrupts = 0
@@ -373,7 +374,8 @@ class VirtualWearer:
         if not h:
             return 1.0
         gap_h = max(0.0, self._clock_hours() - h["last"])
-        mult = (self.cfg["repeat_base"] ** max(0, h["seen"] - 1))
+        n_recent = sum(1 for x in h["recent"] if self._clock_hours() - x < 12.0)
+        mult = (self.cfg["repeat_base"] ** max(0, n_recent - 1))
         mult *= (self.cfg["expand_satiation"] ** max(0, h["expands"] - 1))
         # A day away makes a boring subject interesting again.
         mult = min(1.0, mult + self.cfg["recency_recovery"] * min(1.0, gap_h / 24.0))
@@ -399,6 +401,15 @@ class VirtualWearer:
         topics = self._topics(item)
         if not topics:
             return False
+        # Repetition is itself evidence. By the third sighting of a subject
+        # today I have seen it before, whatever the laptop did or did not do --
+        # and a system that cannot recognise its own repetition will happily
+        # tell me the same thing all afternoon.
+        seen_before = [t for t in topics
+                       if sum(1 for x in self._topic_hist.get(t, {}).get("recent", [])
+                              if self._clock_hours() - x < 12.0) >= 3]
+        if seen_before and self.rng.random() < 0.5:
+            return True
         told = sum(1 for t in topics if self._known_topics.get(t, 0) > 0)
         if told == 0:
             return False
@@ -407,6 +418,43 @@ class VirtualWearer:
         # Told before, but I may not connect this new item to it. Being human
         # about this is the adversarial part.
         return self.rng.random() >= self.cfg["recognition_miss_rate"]
+
+    def _observe(self, item: dict) -> None:
+        """
+        Record that I encountered this item at all.
+
+        Called from every public reaction, not just :meth:`should_interrupt`.
+        I have been *shown* the tenth item about a project whether or not it
+        interrupted me -- and a model that only learns history from the push
+        path cannot see diminishing returns at all in a queue-only milestone,
+        which is the whole regime milestone 1 runs in.
+
+        Keyed on (ts, line) so one event is counted once however many of my
+        reactions the harness asks for.
+        """
+        ts, line = item.get("ts"), item.get("line")
+        if ts is None and not line:
+            return          # unidentifiable: count every presentation
+        key = (ts, line)
+        if key in self._observed:
+            return
+        self._observed.add(key)
+        self._n_seen += 1
+        now = self._clock_hours()
+        for t in self._topics(item):
+            h = self._topic_hist.setdefault(
+                t, {"seen": 0, "recent": [], "expands": 0, "last": 0.0})
+            h["seen"] += 1
+            h["last"] = now
+            # Recent sightings are kept as timestamps, not just counted: "the
+            # tenth item *today*" is what triggers both diminishing returns and
+            # the recognition of repetition. A cumulative counter would make
+            # every topic permanently redundant by day three.
+            h["recent"] = [x for x in h["recent"] if now - x < 12.0]
+            h["recent"].append(now)
+        if item.get("laptop_surfaced"):
+            for t in self._topics(item):
+                self._known_topics[t] = self._known_topics.get(t, 0) + 1
 
     # --- the four public reactions ---
     def should_interrupt(self, item: dict, display_text: str) -> bool:
@@ -422,18 +470,7 @@ class VirtualWearer:
         annoyed.
         """
         self._sync(item)
-        self._n_seen += 1
-
-        # Observing the event updates what I know and what I have seen of it. This is
-        # the only channel by which history enters the model.
-        topics = self._topics(item)
-        for t in topics:
-            h = self._topic_hist.setdefault(t, {"seen": 0, "expands": 0, "last": 0.0})
-            h["seen"] += 1
-            h["last"] = self._clock_hours()
-        if item.get("laptop_surfaced"):
-            for t in topics:
-                self._known_topics[t] = self._known_topics.get(t, 0) + 1
+        self._observe(item)
 
         legible = self._legible(display_text)
         utility = self._utility(item, legible)
@@ -506,22 +543,23 @@ class VirtualWearer:
         """
         0 ignorable, 1 worth a glance, 2 read this now.
 
-        Glancing is cheap, so this asks a different question from the interrupt
-        gate -- is there anything here for me at all -- and mostly ignores last
-        hour's badness. That separation is why the queue can be generous while
-        the push path stays brutal.
+        A glance costs a fraction of an interrupt, so the bar sits lower than
+        the interrupt gate and this asks a different question: is there
+        anything here for me at all. It is deliberately calibrated to agree
+        with :meth:`responds` -- an item the wearer calls worthless here and
+        "worth it" when asked directly would be incoherent, and incoherence in
+        the validation subject masquerades as a finding about the system.
         """
         self._sync(item)
-        legible = self._legible(display_text)
-        u = self._utility(item, legible)
-        # Residual cost only: a day's tiredness, not last hour's badness.
-        u /= max(0.8, self._day_cost())
+        self._observe(item)
         if self._abandoned_day is not None:
             return 0
-
-        if u >= self.cfg["threshold"] + 0.85:
+        legible = self._legible(display_text)
+        u = self._utility(item, legible) / max(0.85, self._day_cost() * 0.75)
+        t = self.cfg["threshold"]
+        if u >= t + 0.55:
             return 2
-        if u >= self.cfg["threshold"] - 0.35:
+        if u >= t - 0.45:
             return 1
         return 0
 
@@ -535,6 +573,7 @@ class VirtualWearer:
         plenty of items are urgent, true, and completely redundant.
         """
         self._sync(item)
+        self._observe(item)
         known = self._already_knew(item)
         topics = self._topics(item)
         legible = self._lens_lookup(item)
@@ -551,11 +590,21 @@ class VirtualWearer:
         return {"worth": int(worth), "already_knew": int(known)}
 
     def _lens_lookup(self, item: dict) -> bool:
-        """Legibility of whatever was actually shown for this item."""
-        for text in (item.get("display_text"), item.get("summary"), item.get("line"), ""):
+        """
+        Legibility of whatever was actually shown for this item.
+
+        Falls back to the item's own text rather than to an empty string: if a
+        harness never calls :meth:`should_interrupt`, the lens cache is empty,
+        and judging every reply as illegible would swing this wearer's verdicts
+        by half a point -- enough to make them contradict :meth:`glance_worth`
+        about the same item, which is incoherent rather than adversarial.
+        """
+        for text in (item.get("display_text"), item.get("summary"), item.get("line")):
             if text and text in self._lens:
                 return bool(self._lens[text]["legible"])
-        return self._legible(item.get("display_text") or item.get("summary") or "")
+        return self._legible(
+            item.get("display_text") or item.get("summary") or item.get("line") or ""
+        )
 
     def _settle(self, item: dict, worth: int, known: int) -> None:
         """Where trust and fatigue move. This is the adversarial core."""
