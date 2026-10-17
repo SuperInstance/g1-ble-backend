@@ -229,8 +229,11 @@ def main() -> int:
         for metric in ("label_days", "clean_pushes", "n_labels",
                        "queue_worth_rate", "rho"):
             present = any(metric in m for m in ev3.values())
+            # `startswith` because a provenance string may carry a reason
+            # after the verdict ("no source: needs the calibration walk").
             check(f"{metric} is ABSENT, not reported as 0",
-                  not present and prov3.get(metric) == "no source",
+                  not present
+                  and str(prov3.get(metric, "")).startswith("no source"),
                   f"present={present} prov={prov3.get(metric)}")
         check("push counters ARE zero, because that is true",
               ev3["push_enabled"]["pushes_today"] == 0

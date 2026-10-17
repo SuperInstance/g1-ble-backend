@@ -210,6 +210,14 @@ ACKNOWLEDGED_DEAD: dict[str, tuple[str, str]] = {
         "anything.",
         "The review UI, with note_unexamined().",
     ),
+    "record_decision": (
+        "memory.py: writes the decisions ledger. No shipped caller, because "
+        "there is no shipped push path -- the ledger is populated by "
+        "--review, which reads rows nothing writes yet.",
+        "The push path, or main.py --queue recording what it decided. Worth "
+        "wiring the moment either exists: an empty ledger looks identical to "
+        "a system that has judged nothing, which is not the same thing.",
+    ),
     "as_json": (
         "interrupt.py: the documented outbox format writer. Used by the "
         "round-trip check in experiments/interrupt_gate.py and intended for "
