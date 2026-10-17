@@ -132,6 +132,24 @@ class LLMConfig:
     max_display_words: int
     provider: str = "custom"
     max_display_chars: int = DEFAULT_MAX_DISPLAY_CHARS
+    # One call, or two (reason then compress).
+    #
+    # This was the shipped design, justified in DESIGN.md with "asking one
+    # model to do both degrades the reasoning". That was never measured. It is
+    # now, against qwen2.5-coder:7b, and the claim did not survive:
+    #
+    #   latency    one 0.26s vs two 2.38s median   (9.2x, reproduced at 13.4x
+    #              on an 18-question corpus)
+    #   recall     19/20 vs 19/20 key facts answered
+    #   invented   1 vs 3 numbers, of which one of each is a real error and
+    #              the rest are checker false positives -- so n=20 cannot
+    #              distinguish the arms
+    #
+    # The expensive option's stated justification is not supported and it
+    # costs an order of magnitude. So the default is now ONE call. The burden
+    # of proof sits with the expensive path: set G1_TWO_STAGE=1 or pass
+    # --two-stage to put it back and compare.
+    two_stage: bool = False
 
     @property
     def target(self) -> str:
@@ -201,6 +219,7 @@ def build_llm_config(provider: str | None = None) -> LLMConfig:
         compressor_model=compressor,
         timeout=_float("G1_LLM_TIMEOUT", 30.0),
         max_retries=int(os.environ.get("G1_LLM_RETRIES", "2") or 2),
+        two_stage=(os.environ.get("G1_TWO_STAGE", "0") or "0") == "1",
         max_display_words=int(
             os.environ.get("G1_MAX_DISPLAY_WORDS", str(DEFAULT_MAX_DISPLAY_WORDS))
             or DEFAULT_MAX_DISPLAY_WORDS
@@ -834,6 +853,52 @@ async def generate_primary_response(
     return text.strip()
 
 
+async def answer_directly(
+    query: str,
+    *,
+    client=None,
+    config: LLMConfig | None = None,
+    context: str = "",
+) -> str:
+    """
+    STAGE 1 ONLY — answer straight into the display format.
+
+    One call instead of two. The 120-character budget is stated as a hard
+    constraint in the system prompt rather than enforced by a second model
+    pass, which means the enforcement layer below is still applied: a
+    language model is not a physical limit.
+
+    Measured 9-13x faster than the two-stage shape at identical answer
+    relevance on a 20-item ground-truth corpus
+    (``experiments/fabrication.py``). The trade is that nothing structurally
+    separates reasoning from formatting, so an invented number can reach the
+    lenses. Whether that trade is worth making is what that experiment is for;
+    this exists so the decision is reversible at runtime.
+    """
+    config = config or build_llm_config()
+    client = client or make_client(config)
+
+    system = ONE_STAGE_SYSTEM
+    if context:
+        system += f"\n\nEarlier in this thread:\n{context}"
+
+    try:
+        text = await _chat(
+            client,
+            model=config.primary_model or config.compressor_model or "",
+            system=system,
+            user=query,
+            max_tokens=120,
+            temperature=0.2,
+        )
+    except Exception as exc:
+        raise LLMStageError(f"direct answer ({config.primary_model}) failed: {exc}") from exc
+
+    if not text.strip():
+        raise LLMStageError("direct answer returned an empty response")
+    return text.strip()
+
+
 async def condense_for_glasses(
     detailed_text: str,
     *,
@@ -941,6 +1006,22 @@ class QueryResult:
 SendFn = Callable[[str], Awaitable]
 
 
+ONE_STAGE_SYSTEM = (
+    "You are the display formatting engine for a head-up display built into "
+    "smart glasses. Answer directly in the text that will be rendered on the "
+    "lenses.\n\n"
+    "HARD CONSTRAINTS:\n"
+    f"1. NEVER exceed {DEFAULT_MAX_DISPLAY_CHARS} characters. This is a hard "
+    "physical cap.\n"
+    "2. Lead with the single most important fact. Keep numbers, names, units "
+    "and error codes; drop connective prose.\n"
+    "3. No preamble, no markdown, no emoji, no restating the question.\n"
+    "4. You must still reason correctly before answering -- think first, then "
+    "emit only the final line.\n\n"
+    "Output the display text and nothing else."
+)
+
+
 def _lens_failure_line(error: str | None) -> str:
     """
     What the lenses show when stage 1 produced nothing at all.
@@ -1015,29 +1096,43 @@ async def run_query(
             if not wearer_ctx.has_evidence:
                 wearer_ctx = None
 
-    say("[1/2] thinking ...")
-    try:
-        result.stage1 = await generate_primary_response(
-            query, client=client, config=config, mode=mode,
-            context=context, preferences=preferences,
-        )
-        say(f"      {word_count(result.stage1)} words")
-    except LLMStageError as exc:
-        result.stage1_error = str(exc)
-        say(f"      stage 1 FAILED: {exc}")
-
-    if result.stage1:
-        say("[2/2] condensing for waveguide ...")
+    if config.two_stage:
+        say("[1/2] thinking ...")
         try:
-            result.stage2 = await condense_for_glasses(
-                result.stage1, client=client, config=config,
-                preferences=preferences, context=wearer_ctx,
-                personalise=personalise,
+            result.stage1 = await generate_primary_response(
+                query, client=client, config=config, mode=mode,
+                context=context, preferences=preferences,
             )
-            say(f"      {word_count(result.stage2)} words")
+            say(f"      {word_count(result.stage1)} words")
         except LLMStageError as exc:
-            result.stage2_error = str(exc)
-            say(f"      stage 2 FAILED: {exc}")
+            result.stage1_error = str(exc)
+            say(f"      stage 1 FAILED: {exc}")
+
+        if result.stage1:
+            say("[2/2] condensing for waveguide ...")
+            try:
+                result.stage2 = await condense_for_glasses(
+                    result.stage1, client=client, config=config,
+                    preferences=preferences, context=wearer_ctx,
+                    personalise=personalise,
+                )
+                say(f"      {word_count(result.stage2)} words")
+            except LLMStageError as exc:
+                result.stage2_error = str(exc)
+                say(f"      stage 2 FAILED: {exc}")
+    else:
+        # One call. In this mode stage1 IS the display text; there is no
+        # separate reasoning pass, so nothing downstream may assume it is a
+        # long-form answer.
+        say("[1/1] answering ...")
+        try:
+            result.stage1 = await answer_directly(
+                query, client=client, config=config, context=context,
+            )
+            say(f"      {word_count(result.stage1)} words")
+        except LLMStageError as exc:
+            result.stage1_error = str(exc)
+            say(f"      FAILED: {exc}")
 
     if result.stage2:
         result.display_text = result.stage2

@@ -104,6 +104,14 @@ async def main() -> int:
         # directly. The previous version did the latter, and that is exactly
         # why a dead `elif` branch in the shipped code passed this section
         # green: the production call shape was never exercised.
+        # This section tests the STAGE-2 prompt, which only exists in two-stage
+        # mode -- so two_stage is pinned on here. The shipped default is now
+        # one call (experiments/fabrication.py), where this prompt is never
+        # sent. Pinning it explicitly rather than inheriting the default keeps
+        # the test meaningful in both architectures instead of silently
+        # asserting against a prompt nobody receives.
+        cfg.two_stage = True
+
         async def ask_through_session(personalise: bool, stage1: str):
             """Drive the real Session.ask -> run_query -> condense path."""
             from session import Session

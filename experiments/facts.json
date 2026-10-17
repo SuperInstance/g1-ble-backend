@@ -1,0 +1,86 @@
+[
+  {"q": "what is the capital of australia", "answer": "Canberra",
+   "key": ["canberra"], "true_nums": [],
+   "note": "entity, no number"},
+
+  {"q": "in what year did the berlin wall fall", "answer": "9 November 1989",
+   "key": ["1989"], "true_nums": ["1989", "9", "11"],
+   "note": "day and month are TRUE, not inventions"},
+
+  {"q": "how many days are in a leap year", "answer": "366",
+   "key": ["366"], "true_nums": ["366", "365", "4"],
+   "note": "365 and 4 are true context"},
+
+  {"q": "what is 144 divided by 12", "answer": "12",
+   "key": ["12"], "true_nums": ["144", "12"],
+   "note": "arithmetic"},
+
+  {"q": "what is 17 percent of 240", "answer": "40.8",
+   "key": ["40.8", "40"], "true_nums": ["40.8", "40", "17", "240"],
+   "note": "arithmetic; a wrong result is a real error"},
+
+  {"q": "a train travels 60 mph for 2.5 hours, how far does it go in miles",
+   "answer": "150 miles", "key": ["150"],
+   "true_nums": ["150", "60", "2.5", "2"],
+   "note": "multi-step arithmetic"},
+
+  {"q": "at what temperature does water boil at sea level in celsius",
+   "answer": "100C", "key": ["100"], "true_nums": ["100", "212"],
+   "note": "100C and 212F are both true"},
+
+  {"q": "how many bones does an adult human have", "answer": "206",
+   "key": ["206"], "true_nums": ["206"],
+   "note": "numeric"},
+
+  {"q": "how many moons does earth have", "answer": "1",
+   "key": ["one", "1"], "true_nums": ["1"],
+   "note": "small integer"},
+
+  {"q": "what is the speed of light in a vacuum in km per second",
+   "answer": "299792 km/s", "key": ["299792", "299,792", "300000", "300,000"],
+   "true_nums": ["299792", "299792458", "186282", "300000", "670616629", "8"],
+   "note": "miles/s and light-minutes are true too"},
+
+  {"q": "how long do red blood cells live in the human body in days",
+   "answer": "about 120 days", "key": ["120"],
+   "true_nums": ["120", "90", "110"],
+   "note": "approximate"},
+
+  {"q": "how many gigabytes are in a terabyte", "answer": "1024",
+   "key": ["1024"], "true_nums": ["1024", "1000", "1"],
+   "note": "1024 and 1000 both defensible"},
+
+  {"q": "what is the speed of sound in air at sea level in metres per second",
+   "answer": "343 m/s", "key": ["343", "340", "331"],
+   "true_nums": ["343", "340", "331", "20", "0"],
+   "note": "approximate, and 20C/0C are true context"},
+
+  {"q": "in what year was the structure of dna published by watson and crick",
+   "answer": "1953", "key": ["1953"], "true_nums": ["1953", "1952"],
+   "note": "1952 is the Nature paper submission year"},
+
+  {"q": "what is the largest ocean on earth", "answer": "Pacific",
+   "key": ["pacific"],
+   "true_nums": ["165.25", "165", "63.8", "179.7", "64", "19.7"],
+   "note": "area figures vary by definition; ALL are true"},
+
+  {"q": "how many players are on the field per side in a football match",
+   "answer": "11", "key": ["11"], "true_nums": ["11", "1", "10"],
+   "note": "11 plus a keeper reading is 11 total"},
+
+  {"q": "what is pi to five decimal places", "answer": "3.14159",
+   "key": ["3.14159", "3.1416"], "true_nums": ["3.14159", "3.1416", "3.14"],
+   "note": "precision"},
+
+  {"q": "how many keys does a standard piano have", "answer": "88",
+   "key": ["88"], "true_nums": ["88", "52", "36", "21.5", "22"],
+   "note": "52 white and 36 black are TRUE"},
+
+  {"q": "what percentage of the human body is water", "answer": "about 60%",
+   "key": ["60", "65", "70"], "true_nums": ["60", "65", "70", "50"],
+   "note": "approximate"},
+
+  {"q": "how many countries are in the united nations", "answer": "193",
+   "key": ["193"], "true_nums": ["193", "194", "5"],
+   "note": "numeric; may be stale"}
+]

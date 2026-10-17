@@ -594,6 +594,8 @@ async def run(args: argparse.Namespace) -> int:
     preflight()
 
     config = build_llm_config(args.provider)
+    if args.two_stage:
+        config.two_stage = True
     if args.max_display_words:
         config.max_display_words = args.max_display_words
     if args.max_display_chars:
@@ -796,6 +798,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", metavar="PATH",
         help="feedback database path "
              "(default: ~/.local/share/g1-ble-backend/feedback.db)",
+    )
+    parser.add_argument(
+        "--two-stage", action="store_true",
+        help="use the original two-call pipeline (answer, then compress). OFF "
+             "by default: measured 9-13x slower at identical answer relevance "
+             "and no measured protection against invented numbers. Turn this "
+             "on to compare, or to fall back if one-stage quality regresses.",
     )
     parser.add_argument(
         "--no-personalise", action="store_true",

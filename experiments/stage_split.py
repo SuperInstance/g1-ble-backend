@@ -40,6 +40,7 @@ sys.path.insert(0, str(ROOT))
 
 from pipeline import (  # noqa: E402
     COMPRESSOR_SYSTEM_PROMPT,
+    ONE_STAGE_SYSTEM,
     DEFAULT_MAX_DISPLAY_CHARS,
     PRIMARY_SYSTEM_PROMPT,
     _chat,
@@ -84,20 +85,6 @@ QUERIES = [
     ("what is the fastest car in the world?", "mph"),
 ]
 
-ONE_STAGE_SYSTEM = (
-    "You are the display formatting engine for a head-up display built into "
-    "smart glasses. Answer directly in the text that will be rendered on the "
-    "lenses.\n\n"
-    "HARD CONSTRAINTS:\n"
-    f"1. NEVER exceed {DEFAULT_MAX_DISPLAY_CHARS} characters. This is a hard "
-    "physical cap.\n"
-    "2. Lead with the single most important fact. Keep numbers, names, units "
-    "and error codes; drop connective prose.\n"
-    "3. No preamble, no markdown, no emoji, no restating the question.\n"
-    "4. You must still reason correctly before answering -- think first, then "
-    "emit only the final line.\n\n"
-    "Output the display text and nothing else."
-)
 
 
 _NUM = __import__("re").compile(r"\d[\d,.:%]*")
