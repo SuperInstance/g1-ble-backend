@@ -393,11 +393,26 @@ assumed:
 - **`documents/08` links `Schema: [08-schema.sql](08-schema.sql)`.** That file is
   not in the repository (`documents/` holds `09-schema.sql` only). The schema the
   stratum queries were validated against is not available to re-check.
-- **`experiments/wiring_audit.py:213-220` is stale** about `record_decision`: it
-  says "No shipped caller, because there is no shipped push path", which stopped
-  being true when `main.py:836-851` wired `--queue-record`. The audit is a
-  hand-maintained table and this entry was missed by the commit that made it
-  wrong.
+- **The `record_decision` staleness claim in this section was itself stale, and is
+  resolved.** The first draft of this bullet read "`experiments/wiring_audit.py:213-220`
+  is stale about `record_decision`… missed by the commit that made it wrong." That was
+  committed **26 seconds after** `b7c3fc9` had already fixed it: the entry is gone, and
+  the audit now FAILS on an acknowledgement whose function a shipped module calls. Kept
+  here because a document that silently drops a wrong claim is how the next reader
+  re-derives it. The attribution was wrong in a second way too — the shipped call site
+  is `interrupt.py:764`, where `record_verdict()` calls `store.record_decision()`,
+  reached from `main.py:867` under `--queue-record`. Not `main.py:836-851`, which is a
+  `print()` inside the dry-run report and contains no wiring at all.
+- **A third rottability class, found while fixing the above: an acknowledgement that
+  blames a credential.** `ambiguous_verdict()`'s entry claimed the function was
+  unreachable because `jev_gate.py` could not authenticate, with the revival condition
+  "the caller exists; only the credential is missing". Both halves were false —
+  `jev_gate.py` has never referenced that function in any commit, so the key was never
+  the blocker. The entry is now a statement about the code (`NO CALLERS AT ALL`), and
+  the audit fails on any reason or revival condition that blames a credential, because
+  such a claim is unverifiable from inside the repo: a key lives in a gitignored `.env`,
+  so the entry turns false the moment someone configures it and nothing in the diff
+  shows it happening.
 - **The 120-character display is nowhere in this document's arithmetic**, because
   nothing here touches legibility. The 5×24 grid and the 0x25 heartbeat's ~32s
   budget constrain the *content* of a label, not which rows get shown. A review

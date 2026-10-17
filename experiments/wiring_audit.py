@@ -41,6 +41,7 @@ Run: ``.venv/bin/python experiments/wiring_audit.py``
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -141,11 +142,19 @@ ACKNOWLEDGED_DEAD: dict[str, tuple[str, str]] = {
         "rather than on its original docstring.",
     ),
     "ambiguous_verdict": (
-        "jev.py: the ambiguity sentinel, unreachable because jev_gate.py "
-        "cannot authenticate (the available key file is a secret-manager "
-        "reference, not an apikey_... key).",
-        "A working TypeSafe key. The caller exists; only the credential is "
-        "missing.",
+        "jev.py: the ambiguity sentinel. NO CALLERS AT ALL -- not from "
+        "shipped code and not from jev_gate.py either. This entry used to "
+        "put the blame on the credential, and its revival condition went "
+        "further and claimed a caller was already in place. Both were "
+        "false. A working apikey_... key is configured now, and "
+        "jev_gate.py has never referenced this function in any commit, so "
+        "the key was never the blocker -- naming it was an excuse that "
+        "read like an explanation. Nothing has ever aggregated across "
+        "sources.",
+        "A shipped caller that combines verdicts from more than one source. "
+        "It exists so a network failure cannot be collapsed into a "
+        "confident no, which needs a real aggregator to be worth having; "
+        "until one ships, that guarantee lives only in its docstring.",
     ),
     "fired": (
         "jev.py: telemetry accessor, read only by experiments/jev_gate.py.",
@@ -438,6 +447,43 @@ def main() -> int:
         print("\n  An acknowledgement is a claim about the present. When the")
         print("  function gets a shipped caller, DELETE the entry -- the code")
         print("  is live and the entry is now a false statement about it.")
+        return 1
+
+    # A third way an acknowledgement rots, and this one fired for real:
+    # naming a CREDENTIAL as the reason something is unreachable.
+    # `ambiguous_verdict` claimed it was unreachable because jev_gate.py
+    # "cannot authenticate", and its revival condition said "the caller
+    # exists; only the credential is missing". A working apikey_... key was
+    # later configured -- and jev_gate.py never called the function at all, so
+    # the credential was never the blocker in the first place.
+    #
+    # This class is worse than a stale caller entry because it is invisible
+    # from inside the repo. A key lives in a gitignored .env, so no committed
+    # table can be a standing authority on whether one is present: the entry
+    # becomes false the moment someone configures the credential, and nothing
+    # in the diff shows it happening. A reason has to be a fact about the code.
+    CREDENTIAL_BLAMED = re.compile(
+        r"only the credential|credential is missing|cannot authenticate"
+        r"|secret-manager reference|needs? (?:a |the )?real (?:\w+ )?key"
+        r"|\bblocked on (?:a |the )?(?:real )?(?:key|credential)\b"
+        r"|no working \w+ key",
+        re.I,
+    )
+    blamed = [n for n in ACKNOWLEDGED_DEAD
+              if CREDENTIAL_BLAMED.search(ACKNOWLEDGED_DEAD[n][0])
+              or CREDENTIAL_BLAMED.search(ACKNOWLEDGED_DEAD[n][1])]
+    if blamed:
+        print(f"\n  FAIL: {len(blamed)} acknowledgement(s) blame a credential "
+              f"for being unreachable:\n")
+        for name in blamed:
+            print(f"    {name}()")
+            print(f"      {ACKNOWLEDGED_DEAD[name][0][:96]}")
+        print("\n  A credential is not a fact about the code. It lives in a")
+        print("  gitignored .env that this audit cannot see, so a committed")
+        print("  table must not assert one way or the other: the entry goes")
+        print("  silently false the moment someone configures the key. If the")
+        print("  honest answer is 'nothing calls it anywhere', write THAT -- it")
+        print("  is a fact about the code, and this audit can check it.")
         return 1
 
     print("\n  OK    every uncalled shipped function is accounted for,")
