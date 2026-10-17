@@ -28,10 +28,40 @@ Deliberate properties of this wrapper:
   caller is responsible for dispatching to a thread, exactly as
   ``Session._record`` does for SQLite.
 
-The honest caveat, from TypeSafe's own docs: *"Treat confidence as how
-concentrated an answer is, not a correctness guarantee, and calibrate
-thresholds against your own labelled data."* Nothing here assumes calibration
-that has not been measured on this corpus.
+Measured facts about Jev, taken from SuperInstance/AI-Writings
+(situations/JEV-USAGE-LOG.md, situations/JEV-FINDINGS.md, 2026-09-29) rather
+than from the vendor page. They constrain how this module may be used:
+
+* **~150 ms typical latency**, ~450 input / 40 output tokens per call. That
+  fits the delivery path; a 32s link budget is not the constraint.
+* **Use ``choice``, not N independent ``noul``s.** Measured: independent nouls
+  are not mutually exclusive -- on "most moons" BOTH Jupiter (0.52) and Saturn
+  (0.79) cleared 0.5, so a threshold reader accepts a wrong answer. ``choice``
+  normalises across options, costs 1 call instead of N, and its confidence
+  honestly flagged the hardest item. Reserve per-option ``noul`` for
+  genuinely non-exclusive (multi-select) questions.
+* **``choice`` needs a ``criteria`` MAP keyed by option.** An ``options``
+  array alone returns 422.
+* **DO NOT use Jev for character or letter counting.** Two independent
+  sources agree: a 32-item competence map scored counting 2/5 (0.40) while
+  everything else ran 1.00, and letter-by-letter spelling probes came back
+  0.82-0.89 TRUE on deliberate misspellings -- confidently wrong. This project
+  has a 120-CHARACTER display budget, which is precisely a character-counting
+  task. ``enforce_display_budget`` in pipeline.py is therefore authoritative
+  and Jev is explicitly barred from that role.
+* **Competent at** arithmetic, dates, geography, units, factual recall, logic,
+  geometry and sequences. Relevant here because it makes Jev a legitimate
+  INDEPENDENT judge for the fabrication question in
+  ``experiments/fabrication.py`` -- which is the measurement that decides
+  whether the two-stage pipeline earns its cost.
+* Vendor caveat, unretracted: *"Treat confidence as how concentrated an answer
+  is, not a correctness guarantee, and calibrate thresholds against your own
+  labelled data."*
+
+A note on degradation, learned the hard way elsewhere: the same corpus records
+a connector that "random-fallbacked" before the schema arrived -- probabilities
+that were "costumes draped over ignorance". This module returns ``None`` on any
+failure and never invents a number, for exactly that reason.
 """
 
 from __future__ import annotations
@@ -55,6 +85,41 @@ WORTHY = "worth interrupting: new, specific, and time-sensitive"
 UNSURE = "borderline: might matter but could wait"
 
 
+# Upstream intermittently returns 503/429 (measured: labs/jev-kat retries on
+# both). Everything else will not fix itself.
+RETRY_BACKOFF_S = (0.25, 0.75, 2.0)
+
+# The ambiguity sentinel. On any failure an interrupt decision must NOT read as
+# "definitely not worth it", because 0 means that. The ESP32 cell in
+# AI-Writings encodes it explicitly as p=0.5, confidence=0.0 -- "spike = 0.5
+# ambiguous". In Python the honest encoding is None, which is falsy but is not
+# zero, and `ambiguous_verdict()` below exists so that a caller aggregating
+# across sources cannot accidentally turn "unknown" into a confident no.
+AMBIGUOUS = 0.5
+
+
+def _is_transient(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(s in text for s in ("503", "429", "timeout", "temporar", "overload"))
+
+
+def ambiguous_verdict(model: str = DEFAULT_MODEL) -> GateVerdict:
+    """
+    An explicit "we do not know", distinct from "not worth it".
+
+    Never collapse a network failure into a quiet no: on this project that
+    would silently suppress notifications the wearer asked for, and the
+    suppress path is the one that is supposed to be the most careful.
+    """
+    return GateVerdict(
+        worth_interrupting=AMBIGUOUS,
+        confidence=0.0,
+        probabilities={},
+        model=model,
+        latency_ms=0.0,
+    )
+
+
 @dataclass(frozen=True)
 class GateVerdict:
     """One gate decision, with the reasoning kept alongside it."""
@@ -69,9 +134,23 @@ class GateVerdict:
         return self.worth_interrupting >= threshold
 
 
+# Two spellings are in circulation. The SDK documents TYPESAFE_API_KEY; every
+# live client in SuperInstance/AI-Writings uses TYPESAFEAI_KEY, and the key
+# scrub receipt shows the real token shape is "apikey_...". Accept both.
+KEY_ENVS = ("TYPESAFE_API_KEY", "TYPESAFEAI_KEY")
+
+
+def api_key() -> Optional[str]:
+    for name in KEY_ENVS:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 def available() -> bool:
     """True when the SDK is installed and a key is configured."""
-    if not os.environ.get("TYPESAFE_API_KEY"):
+    if not api_key():
         return False
     try:
         import typesafe_sdk  # noqa: F401
@@ -99,7 +178,7 @@ def worth_interrupting(
     sits on the delivery path, and a slow answer is worth less than the
     deterministic fallback it replaces.
     """
-    if not os.environ.get("TYPESAFE_API_KEY"):
+    if not api_key():
         return None
     try:
         from typesafe_sdk import Choice
@@ -109,24 +188,34 @@ def worth_interrupting(
     import time
 
     started = time.monotonic()
-    try:
-        client = client or _client()
-        response = client.system_one(
-            state={"message": text},
-            questions={
-                "interrupt": Choice(
-                    instructions=WORTH_INTERRUPTING,
-                    criteria={
-                        "worthy": WORTHY,
-                        "not_worthy": NOT_WORTHY,
-                        "borderline": UNSURE,
-                    },
-                ),
-            },
-            model=model,
-            timeout=timeout,
-        )
-    except Exception:      # noqa: BLE001 -- a gate must never crash delivery
+    response = None
+    for attempt in range(len(RETRY_BACKOFF_S) + 1):
+        try:
+            client = client or _client()
+            response = client.system_one(
+                state={"message": text},
+                questions={
+                    "interrupt": Choice(
+                        instructions=WORTH_INTERRUPTING,
+                        criteria={
+                            "worthy": WORTHY,
+                            "not_worthy": NOT_WORTHY,
+                            "borderline": UNSURE,
+                        },
+                    ),
+                },
+                model=model,
+                timeout=timeout,
+            )
+            break
+        except Exception as exc:      # noqa: BLE001
+            # 503/429 are documented as intermittent upstream, and one client in
+            # AI-Writings counts every retry as a finding rather than hiding it.
+            # Anything else (401, schema error) will not fix itself, so stop.
+            if not _is_transient(exc) or attempt == len(RETRY_BACKOFF_S):
+                return None
+            time.sleep(RETRY_BACKOFF_S[attempt])
+    if response is None:
         return None
 
     elapsed = (time.monotonic() - started) * 1000.0

@@ -370,6 +370,7 @@ corrections are kept visible rather than quietly edited:
 | 14 | [Round 2: zcode convergence](documents/14-round2-zcode-convergence.md) | Final design proposal, partly in disagreement with 13. |
 | 15 | [Adversarial finding triage](documents/15-adversarial-finding-triage.md) | What survived an attack, what did not, and what is still open. |
 | 16 | [Play-test: the first real run](documents/16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
+| 17 | [JEV and JEPA: what transfers](documents/17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.
