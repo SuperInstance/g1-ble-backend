@@ -20,6 +20,13 @@ changed* is more useful than a clean final story.
 | 07 | [Panel: interaction and event stream](07-panel-interaction.md) | Push budgets, gesture vocabulary, candidate sources, what kills the product. |
 | 08 | [Panel: learning substrate](08-panel-learning-substrate.md) | Two-axis signal decomposition, review loop, calibration. |
 | 09 | [Proposed schema](09-schema.sql) | Executable SQLite DDL for the decisions ledger. Verified against SQLite 3.46.1. |
+| 10 | [Turn B: glanceability](10-turn-B-glanceability.md) | Can a decision model verify glanceability pre-display? Measured against a regex baseline. |
+| 11 | [Turn A: blocked attempt](11-turn-A-attempt.md) | Claude's run that was sandboxed — kept as a record of what could not be measured. |
+| 12 | [Turn C: gait and host](12-turn-C-gait-and-host.md) | Gait simulation, the ρ cliff, and the two-tier host split. |
+| 13 | [Round 2: Claude convergence](13-round2-claude-convergence.md) | Final design proposal, plus the sharpest argument in the corpus. |
+| 14 | [Round 2: zcode convergence](14-round2-zcode-convergence.md) | Final design proposal, partly in disagreement with 13. |
+
+The synthesised design is [`../DESIGN.md`](../DESIGN.md).
 
 ## How the panel was run
 
