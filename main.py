@@ -900,6 +900,20 @@ def selftest() -> int:
     check("fragment count still carried",
           all(p[2] == len(fragmented) for p in fragmented), True)
 
+    # Regression: build_text_packets used to split only BETWEEN wrapped lines.
+    # At MTU 23 the capacity is 11 bytes, so a 24-character line produced a
+    # 33-byte packet that G1Arm.write rejects with a ValueError. The header
+    # checks above passed anyway, because nothing asserted the LENGTH.
+    text = "Terminal connection established. System online."
+    for mtu in (251, 185, 100, 23):
+        pkts = controller.build_text_packets(text, mtu=mtu)
+        cap = mtu - 3
+        check(f"every packet fits ATT at MTU {mtu}",
+              all(len(x) <= cap for x in pkts), True)
+        check(f"payload reassembles at MTU {mtu}",
+              b"".join(x[9:] for x in pkts).decode("utf-8", "replace")
+              .startswith("Terminal"), True)
+
     print("\nasync pipeline checks")
 
     async def async_checks() -> None:

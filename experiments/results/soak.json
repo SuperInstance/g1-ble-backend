@@ -1,0 +1,94 @@
+{
+  "policy": {
+    "arm": "policy",
+    "days": 14,
+    "candidates": 331,
+    "queued": 331,
+    "pushed": 0,
+    "overflow": 315,
+    "peeks": 54,
+    "examined": 4,
+    "re_examined": 0,
+    "reviewed": 406,
+    "earned": 4,
+    "rejected": 402,
+    "already_knew": 0,
+    "queue_worth_rate": 0.0121,
+    "examined_rate": 0.0121,
+    "re_examination_rate": 0.0,
+    "axes_final": {
+      "examination_source": "touchbar",
+      "g1_model": "off",
+      "interrupt_gate": "rules",
+      "detail_generation": "off",
+      "push_enabled": "off"
+    },
+    "axes_unresolved": [
+      "examination_source",
+      "interrupt_gate",
+      "detail_generation"
+    ],
+    "evidence": {
+      "g1_model": {
+        "n_labels": 266,
+        "queue_worth_rate": 0.0
+      },
+      "detail_generation": {
+        "drill_miss_rate": null
+      },
+      "interrupt_gate": {
+        "clean_pushes": 0
+      },
+      "push_enabled": {
+        "label_days": 1
+      }
+    },
+    "wall_seconds": 0.03
+  },
+  "fixed": {
+    "arm": "fixed",
+    "days": 14,
+    "candidates": 331,
+    "queued": 331,
+    "pushed": 0,
+    "overflow": 315,
+    "peeks": 54,
+    "examined": 4,
+    "re_examined": 0,
+    "reviewed": 406,
+    "earned": 4,
+    "rejected": 402,
+    "already_knew": 0,
+    "queue_worth_rate": 0.0121,
+    "examined_rate": 0.0121,
+    "re_examination_rate": 0.0,
+    "axes_final": {
+      "examination_source": "touchbar",
+      "g1_model": "off",
+      "interrupt_gate": "rules",
+      "detail_generation": "off",
+      "push_enabled": "off"
+    },
+    "axes_unresolved": [
+      "examination_source",
+      "interrupt_gate",
+      "detail_generation"
+    ],
+    "evidence": {
+      "g1_model": {
+        "n_labels": 266,
+        "queue_worth_rate": 0.0
+      },
+      "detail_generation": {
+        "drill_miss_rate": null
+      },
+      "interrupt_gate": {
+        "clean_pushes": 0
+      },
+      "push_enabled": {
+        "label_days": 1
+      }
+    },
+    "wall_seconds": 0.02
+  }
+}

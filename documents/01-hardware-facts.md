@@ -1,7 +1,11 @@
 # Hardware facts, measurements, and research
 
-Everything here was verified on this machine or read from a primary source.
-Nothing here is a guess.
+**Read the provenance labels.** Section 2 was measured on this machine.
+Section 1 is *sourced* — it comes from the official demo app and community
+notes, not from a G1, because none was available. Section 3 is published
+research. None of it is a guess, but "sourced" is not "verified", and an
+earlier revision of this file opened with a blanket claim of certainty that
+was too strong. See also `.context/ble.md`.
 
 ## 1. Protocol facts (from primary sources)
 

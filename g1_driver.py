@@ -1085,7 +1085,6 @@ class EvenG1Controller:
         subtracted from ``mtu`` before chunking the UTF-8 payload.
         """
         capacity = max(1, mtu - 3 - 9)
-        encoded = text.encode("utf-8")
 
         # Wrap on characters, then re-pack so no packet exceeds the capacity.
         lines = textwrap.wrap(text, width=chars_per_line) or [""]
@@ -1100,6 +1099,33 @@ class EvenG1Controller:
                 buffer = encoded_line if not buffer else buffer + b" " + encoded_line
         if buffer:
             chunks.append(buffer)
+
+        # A single wrapped line can STILL exceed the capacity when the MTU is
+        # small. At MTU 23 the capacity is 11 bytes, so a 24-character line
+        # yields a 33-byte packet and `G1Arm.write` rejects it with a
+        # ValueError — text silently stops rendering on exactly the backend
+        # where MTU negotiation is least reliable.
+        #
+        # The line-splitting above never divides a line, so hard-split any
+        # chunk that still does not fit. At MTU 251 (capacity 239) this never
+        # fires; it exists for the degraded case.
+        final: list[bytes] = []
+        for chunk in chunks:
+            if len(chunk) <= capacity:
+                final.append(chunk)
+                continue
+            # Split on a UTF-8 boundary so a multi-byte character is never
+            # cut in half.
+            start = 0
+            while start < len(chunk):
+                end = min(start + capacity, len(chunk))
+                while end < len(chunk) and (chunk[end] & 0xC0) == 0x80:
+                    end -= 1  # landed inside a continuation byte
+                if end == start:
+                    end = min(start + capacity, len(chunk))
+                final.append(chunk[start:end])
+                start = end
+        chunks = final
 
         total = len(chunks)
         seq = 0

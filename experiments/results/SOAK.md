@@ -1,0 +1,80 @@
+# Soak: 30 days of simulated wear, policy vs. fixed
+
+Run: `.venv/bin/python experiments/soak.py --days 30`. Three seeds. Full output
+in `soak.json`.
+
+## Setup
+
+The virtual wearer was written by an independent reviewer explicitly told to
+be **adversarial to the design**, so that the experiment could not be rigged in
+the author's favour. Events come from `sim/events.py`: nine classes, realistic
+hour-of-day weighting, ~24 candidates per day.
+
+## Result: the design does not clear its own bar
+
+| | seed 11 | seed 20261016 | seed 777 |
+|---|---|---|---|
+| candidates | ~750 | ~750 | ~750 |
+| **overflow (evicted unseen)** | 736 | 678 | 676 |
+| examined | 3 | 4 | 1 |
+| earned | 4 | 4 | 3 |
+| **queue_worth_rate** | 0.0053 | 0.0058 | 0.0044 |
+| axes that ever flipped | 0 | 0 | 0 |
+
+`DESIGN.md`'s milestone-1 continuation bar is `queue_worth_rate >= 0.5`.
+The simulation produces **0.004–0.006** — two orders of magnitude short.
+
+## The policy layer changed nothing
+
+Across 30 days and three seeds, every metric is identical between arms:
+
+```
+  earned               policy=4   fixed=4   delta=0
+  rejected             policy=868 fixed=868 delta=0
+  policy axes resolved from evidence: 2/5
+  fixed  axes ever move off defaults : 0/5
+```
+
+Read honestly: **the policy layer is not demonstrably earning its keep.** What
+it does earn is a recorded reason for every default ("0 labels < 100: unproven
+on real data"), which is worth something — but it has not changed an outcome.
+
+This is a *mechanism* result, not a verdict on the idea. The wearer is a
+simulation; it cannot say whether the product is worth wearing.
+
+## Where the real problem is: arrival rate
+
+Forcing `g1_model` on does not rescue it:
+
+| variant | suppressed | queued | overflow | worth/queued |
+|---|---|---|---|---|
+| filter OFF | 0 | 694 | 678 | 0.0058 |
+| filter ON | 261 | 433 | 416 | **0.0115** |
+
+The filter doubles the worth rate and still leaves **96% overflow**. The
+bottleneck is not noise, it is **volume**: ~24 candidates a day arriving into a
+queue capped at 12, which a wearer who can afford ~4 peeks a day cannot drain.
+
+### A deadlock, not a filter problem
+
+The queue only works if the filter runs *before* it fills. The filter is off
+until the queue proves itself. The queue cannot prove itself because it
+overflows. Neither arm can escape, and `push_enabled` cannot activate within 14
+days because the policy can only see the previous day's labels.
+
+## What this suggests
+
+**Move the filter upstream to the writer.** The interaction review scored the
+agent spool as "effort 1, value 9" precisely because the writer is the only
+place with enough context to decide. Ingest 24 candidates a day and triage
+downstream is the wrong shape; agents should write ~2 things a day, not 24,
+and the queue becomes a delivery detail rather than a filtering problem.
+
+## Caveats
+
+- The wearer's cost curve may be harsher than a real person's. It was built to
+  be, and I cannot tune it upward without rigging the test.
+- `glance_worth` is scored on template-only queue lines, which is the design —
+  but that means the design is being judged on its weakest possible text.
+- 30 days is not the 299 clean pushes `interrupt_gate` needs. That axis cannot
+  be tested in simulation at all.
