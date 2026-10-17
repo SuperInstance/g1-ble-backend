@@ -49,7 +49,7 @@ come from reading the code; re-check them with the commands below.
 | a clock/deadline feature improves precision | **falsified** (+0.000; veto variants worse) | REPORT-A2 |
 | the SHIPPED `check_glanceable` performs like 0.688 | **assumed**: it adds referent, hedge and lead≥6 rules (:609-626) never measured | pipeline.py:589 |
 | the fact must sit in the first ~48 chars to be glanceable | **assumed** | Turn B §1 |
-| injecting `preferences()` improves summaries | **still assumed**. The substrate under it is now measured (`experiments/learning_substrate.py`) and the injection path is gated + falsifiable (`personalise=False`); the A/B itself is still unrun | memory.py:interests() |
+| injecting interests improves answers | **FALSIFIED** (2026-10-16). The A/B ran: the salience gate fires on **0/8** ordinary questions, and when it fires (n=3) it shifts answer polarity and destabilises it — which rule 9 forbids. Costs 0.44s vs 0.25s. | experiments/personalisation_ab.py, documents/18 |
 | EVENT_WEIGHTS, HALF_LIFE_DAYS=7, GLANCEABILITY_MIN=0.5 | **assumed**, untuned | memory.py:54,75; pipeline.py |
 
 ### Open
