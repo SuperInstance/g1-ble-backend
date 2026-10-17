@@ -586,7 +586,19 @@ async def run(args: argparse.Namespace) -> int:
         from memory import FeedbackStore as RevStore
 
         rev = RevStore(args.store)
-        pending = rev.unlabelled(decision=args.review, limit=args.review_n)
+        # No `since_days`: the horizon used to default to 30 days and made
+        # anything older permanently unlabelable -- past the cutoff a row can
+        # never be offered, so it can never be answered, and nothing reported
+        # the ones lost. `--review-days` is there for an operator who wants a
+        # window; the default is "show me everything still unanswered".
+        pending = rev.unlabelled(decision=args.review, limit=args.review_n,
+                                 since_days=args.review_days or None)
+        # Truncation is reported, never inferred from a short list. A limit
+        # that quietly shows 30 of 1,476 reads exactly like a nearly empty
+        # queue, which is the safest-looking possible lie.
+        waiting = rev.unlabelled_count(decision=args.review,
+                                       since_days=args.review_days or None)
+        hidden = max(0, waiting - len(pending))
 
         print("Review — the only ground truth this system has.\n")
         print("  y  worth interrupting        n  not worth it")
@@ -602,6 +614,11 @@ async def run(args: argparse.Namespace) -> int:
         print(f"  {len(pending)} to review "
               f"(oldest first — a newest-first queue drifts to whatever "
               f"happened today and hides a consistently bad source)\n")
+        if hidden:
+            print(f"  NOTE: {waiting} are actually waiting. This shows the "
+                  f"oldest {len(pending)}; {hidden} more are behind them.")
+            print(f"        --review-n raises the limit. They are not gone.")
+            print()
         labelled = 0
         skipped_censored = 0
         for row in pending:
@@ -1157,7 +1174,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-n", type=int, default=20, metavar="N",
         help="how many unlabelled decisions --review shows (default: 20). "
-             "Oldest first on purpose.",
+             "Oldest first on purpose. If more are waiting, --review says how "
+             "many rather than showing a short list that reads like an empty "
+             "queue.",
+    )
+    parser.add_argument(
+        "--review-days", type=float, default=0.0, metavar="D",
+        help="only offer decisions from the last D days (0 = no limit, the "
+             "default). There USED to be a hardcoded 30-day horizon, which "
+             "made older rows permanently unlabelable: past the cutoff a row "
+             "could never be shown, so it could never be answered, and nothing "
+             "reported the ones lost. Set this only if you deliberately want "
+             "recent history.",
     )
     parser.add_argument(
         "--kill-switch", choices=("arm", "disarm", "show"), default=None,

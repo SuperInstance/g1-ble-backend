@@ -537,7 +537,96 @@ def main() -> int:
         check("...and a later replay of the NEW event still folds in",
               len(idem.unlabelled()) == n_new,
               "replaying the new event did not duplicate it either")
+
+        # A naive timestamp keys 4h off its UTC-aware twin outside UTC,
+        # because datetime.timestamp() reads a naive value as LOCAL time. No
+        # shipped path builds one today; this stops that from becoming a
+        # duplicate that only appears in some timezones. Asserted through
+        # record_verdict, because that is where the normalisation lives --
+        # calling record_decision with an explicit ts would test nothing.
+        n = len(idem.unlabelled())
+        for stamp in (datetime(2026, 10, 16, 21, 0, 0),
+                      datetime(2026, 10, 16, 21, 0, 0, tzinfo=timezone.utc)):
+            q.record_verdict(idem, q.Verdict(
+                q.Candidate(source="cal", cls="meeting", line="tz probe",
+                            ts=stamp),
+                "queue", "g", "r"), dry_run=True)
+        # Exactly ONE new row, not two. This has teeth only outside UTC: run
+        # the suite with TZ=America/New_York to see it, because under UTC the
+        # naive and aware epochs coincide and the bug is invisible. That is
+        # precisely the "only on some machines" failure it guards against.
+        check("a naive stamp and its UTC twin are ONE event, not two",
+              len(idem.unlabelled()) == n + 1,
+              f"{len(idem.unlabelled())} rows vs {n}+1; under a non-UTC TZ the "
+              f"naive value reads as local time and they split into two")
         idem.close()
+
+    print("\n14. the evidence does not depend on how the human worked")
+    # Two ways a metric can be a function of the machinery rather than of the
+    # system being measured. Both were live.
+    with _tf.TemporaryDirectory() as tmp:
+        st = FeedbackStore(Path(tmp) / "order.db")
+
+        # (a) the review horizon. It defaulted to 30 days, which meant a row
+        # past the cutoff could never be OFFERED, so it could never be
+        # ANSWERED, so it stayed unlabelled forever -- and nothing reported the
+        # loss. This project does not drop things; a window that silently
+        # retires part of the queue is dropping them.
+        #
+        # Ages are anchored to the real clock and kept off the boundary by half
+        # a day, because the cutoff is computed from `time.time()` at query
+        # time. A row sitting exactly on the cutoff belongs to whichever side
+        # the microseconds land on, and a test that depends on that is a test
+        # that fails on a slow machine.
+        import time as _rt
+        base = _rt.time()
+        for i in range(50):
+            st.record_decision(decision="queue", cls="digest", source="cal",
+                               line=f"item {i}",
+                               ts=base - (i + 0.5) * 86400.0)
+        default_n = len(st.unlabelled(limit=100))
+        counted = st.unlabelled_count()
+        check("no review horizon by DEFAULT -- nothing is unreachable",
+              default_n == counted == 50,
+              f"unlabelled()={default_n}, unlabelled_count()={counted}, of 50 "
+              f"written; the old 30-day default exposed 29 and orphaned 21")
+        check("an explicit window still works when asked for",
+              len(st.unlabelled(limit=100, since_days=10)) == 10
+              and len(st.unlabelled(limit=100, since_days=5)) == 5,
+              f"{len(st.unlabelled(limit=100, since_days=10))} within 10 days, "
+              f"{len(st.unlabelled(limit=100, since_days=5))} within 5, of 50")
+        check("the count ignores the display limit",
+              st.unlabelled_count() == 50 and len(st.unlabelled(limit=7)) == 7,
+              "showing 7 of 50 must not read as a queue holding 7")
+        st.close()
+
+        # (b) clean_pushes ordered by reviewed_at, i.e. by when a human got
+        # round to answering. Five pushes, one mis-fire at #2: the streak read
+        # 3 when reviewed in push order and 0 when #2 happened to be answered
+        # last. Same labels, same ledger. This is the metric behind
+        # interrupt_gate -- the axis that decides whether the rules have
+        # earned trust -- so it must not depend on the answerer's tidiness.
+        def streak_under(review_order: list[int]) -> int:
+            db = Path(tmp) / f"streak-{len(review_order)}-{review_order[0]}.db"
+            s2 = FeedbackStore(db)
+            ids = [s2.record_decision(decision="push", cls="meeting",
+                                      source="cal", line=f"push {i}",
+                                      dry_run=False, ts=float(i))
+                   for i in range(1, 6)]
+            for n, i in enumerate(review_order, start=1):
+                s2.set_label(ids[i - 1], 0 if i == 2 else 1, ts=float(n))
+            out = s2.label_stats()["clean_pushes"]
+            s2.close()
+            db.unlink()
+            return out
+
+        orders = ([1, 2, 3, 4, 5], [1, 3, 4, 5, 2], [5, 4, 3, 2, 1],
+                  [2, 1, 3, 4, 5])
+        streaks = {tuple(o): streak_under(o) for o in orders}
+        check("clean_pushes does not depend on REVIEW order",
+              set(streaks.values()) == {3},
+              f"{streaks} -- all four are the same ground truth; pushes 5,4,3 "
+              f"are clean and #2 is the mis-fire")
 
     print()
     if FAILURES:

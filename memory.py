@@ -1331,7 +1331,7 @@ class FeedbackStore:
 
     @_synchronized
     def unlabelled(self, *, decision: Optional[str] = None,
-                   limit: int = 30, since_days: float = 30.0
+                   limit: int = 30, since_days: Optional[float] = None
                    ) -> list[dict]:
         """
         Decisions still awaiting a human answer, oldest first.
@@ -1340,12 +1340,30 @@ class FeedbackStore:
         guarantees the label set drifts toward whatever happened today and
         silently drops the backlog that would show whether a source class was
         consistently bad.
+
+        `since_days` is None by DEFAULT, and it used to default to 30. That
+        default was self-defeating: ordering oldest-first is only worth
+        anything if the old rows are actually reachable, and a 30-day cutoff
+        made them permanently unreachable. Past the cutoff a row can never be
+        OFFERED, so it can never be LABELLED, so it stays unlabelled forever
+        and is invisible in every count that matters. On a ledger of 50 rows
+        aged 1..50 days, the default exposed 29 and orphaned 21 -- with
+        nothing anywhere reporting the 21.
+
+        This project does not drop things. A hardcoded window that silently
+        retires part of the queue is dropping them, quietly, in a way that
+        looks like a quiet queue rather than a discarded backlog.
+
+        Callers that genuinely want a window pass one. `--review` does not,
+        and additionally reports how many rows its LIMIT hid, so truncation
+        is visible rather than inferred from a short list.
         """
-        cutoff = time.time() - since_days * 86400.0
         sql = ("SELECT id, created_at, decision, cls, source, line, gate, "
-               "reason, observable FROM decisions "
-               "WHERE label IS NULL AND created_at >= ?")
-        args: list = [cutoff]
+               "reason, observable FROM decisions WHERE label IS NULL")
+        args: list = []
+        if since_days is not None:
+            sql += " AND created_at >= ?"
+            args.append(time.time() - float(since_days) * 86400.0)
         if decision:
             sql += " AND decision = ?"
             args.append(decision)
@@ -1354,6 +1372,28 @@ class FeedbackStore:
         with self._lock:
             rows = self._conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
+
+    @_synchronized
+    def unlabelled_count(self, *, decision: Optional[str] = None,
+                         since_days: Optional[float] = None) -> int:
+        """
+        How many decisions are still unanswered, ignoring any display limit.
+
+        Separate from `unlabelled()` because the two answer different
+        questions: one asks what to SHOW, the other asks how much is WAITING.
+        Conflating them is how a queue holding 1,476 items gets displayed as
+        "30 to review" and read as a queue holding 30.
+        """
+        sql = "SELECT COUNT(*) c FROM decisions WHERE label IS NULL"
+        args: list = []
+        if decision:
+            sql += " AND decision = ?"
+            args.append(decision)
+        if since_days is not None:
+            sql += " AND created_at >= ?"
+            args.append(time.time() - float(since_days) * 86400.0)
+        with self._lock:
+            return int(self._conn.execute(sql, args).fetchone()["c"])
 
     @_synchronized
     def label_stats(self) -> dict:
@@ -1385,7 +1425,19 @@ class FeedbackStore:
                 "SELECT label, already_know FROM decisions "
                 "WHERE decision = 'push' AND label IS NOT NULL "
                 "AND dry_run = 0 "
-                "ORDER BY reviewed_at, id"
+                # created_at, NOT reviewed_at. This streak means "consecutive
+                # clean pushes IN THE ORDER THEY HAPPENED". It used to order by
+                # reviewed_at, which measures when a human got round to
+                # answering -- and the answer then depended on the answerer's
+                # order rather than on the system's behaviour. Measured: five
+                # pushes with one mis-fire at #2 give a streak of 3 when
+                # reviewed in push order and 0 when #2 happened to be answered
+                # last. Same ground truth, same ledger, 0 vs 3.
+                #
+                # That is the metric behind interrupt_gate, the axis that
+                # decides whether the rules have earned trust. It must not be a
+                # function of how tidily somebody worked through the backlog.
+                "ORDER BY created_at, id"
             ).fetchall()
             # Count EVERY labelled row for n_labels, dry-run pushes included.
             # A human answered those questions; that is real ground truth about
@@ -1403,9 +1455,9 @@ class FeedbackStore:
         n_labels = int(labelled_any or 0)
         worth = (sum(r["label"] for r in queued) / len(queued)) if queued else None
 
-        # Streak: walk the pushes newest-first until one is false. An item
-        # the wearer already knew counts as a mis-fire for this purpose: the
-        # gate interrupted them about something they did not need.
+        # Streak: walk the pushes newest-FIRST BY PUSH TIME until one is false. An
+        # item the wearer already knew counts as a mis-fire for this purpose:
+        # the gate interrupted them about something they did not need.
         streak = 0
         for r in reversed(pushed):
             if r["label"] == 0 or r["already_know"] == 1:

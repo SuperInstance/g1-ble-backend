@@ -753,6 +753,14 @@ def record_verdict(store, verdict: "Verdict", *, observable: bool = True,
     project has been burned by before.
     """
     c = verdict.candidate
+    # Normalise a naive stamp to UTC before taking the epoch, matching
+    # `from_json`. `datetime.timestamp()` on a naive value silently interprets
+    # it as LOCAL time, so the same event would key differently on a machine
+    # that changes timezone or crosses a DST boundary -- a duplicate that only
+    # appears on some days and in some places. No shipped path builds a naive
+    # Candidate today; this makes that stay true of the key, not just of
+    # ingestion.
+    event_ts = c.ts if c.ts.tzinfo else c.ts.replace(tzinfo=timezone.utc)
     return store.record_decision(
         decision=verdict.action,
         cls=c.cls,
@@ -762,7 +770,7 @@ def record_verdict(store, verdict: "Verdict", *, observable: bool = True,
         reason=verdict.reason,
         observable=observable,
         dry_run=dry_run,
-        ts=c.ts.timestamp(),
+        ts=event_ts.timestamp(),
     )
 
 

@@ -151,12 +151,6 @@ ACKNOWLEDGED_DEAD: dict[str, tuple[str, str]] = {
         "jev.py: telemetry accessor, read only by experiments/jev_gate.py.",
         "Shipped instrumentation, when there is a shipped interrupt gate.",
     ),
-    "worth_interrupting": (
-        "jev.py: the candidate gate. Called by experiments/jev_gate.py only, "
-        "and the shipped decision is interrupt.py's deterministic rules.",
-        "A measured reason to prefer it over interrupt.py. It has none yet: "
-        "all 40 calls have returned 401.",
-    ),
     "ready": (
         "session.py: 'resolve models once per session'. ask() and more() "
         "each call ensure_models directly, so this wrapper is unused.",
@@ -166,14 +160,6 @@ ACKNOWLEDGED_DEAD: dict[str, tuple[str, str]] = {
         "memory.py: accessor with no caller and no docstring. Never called in "
         "any commit.",
         "Deletion.",
-    ),
-    "settled_by_evidence": (
-        "policy.py: True only when a metric, not a person, decided the axis. "
-        "Reads main.py --queue and --evidence, which is deliberate: a dry run "
-        "that shows PUSH rows because somebody pinned an axis by hand looks "
-        "exactly like one showing them on evidence.",
-        "Already used. Listed here because it was unacknowledged for one "
-        "commit while it had no caller, which is the guard working.",
     ),
     "record_push": (
         "memory.py: writes push INTENT, called by experiments/interrupt_gate.py "
@@ -209,14 +195,6 @@ ACKNOWLEDGED_DEAD: dict[str, tuple[str, str]] = {
         "triage. Not for gating -- absence of a reaction must never gate "
         "anything.",
         "The review UI, with note_unexamined().",
-    ),
-    "record_decision": (
-        "memory.py: writes the decisions ledger. No shipped caller, because "
-        "there is no shipped push path -- the ledger is populated by "
-        "--review, which reads rows nothing writes yet.",
-        "The push path, or main.py --queue recording what it decided. Worth "
-        "wiring the moment either exists: an empty ledger looks identical to "
-        "a system that has judged nothing, which is not the same thing.",
     ),
     "as_json": (
         "interrupt.py: the documented outbox format writer. Used by the "
@@ -438,7 +416,32 @@ def main() -> int:
         print("  would revive it, or give it a caller.")
         return 1
 
-    print("\n  OK    every uncalled shipped function is accounted for.")
+    # An acknowledgement goes stale the moment the function is wired, and a
+    # stale one is worse than no entry: it asserts "no shipped caller" about
+    # code that now has one, so it teaches the next reader the wrong thing
+    # about the system. This fired for real -- `record_decision` was listed as
+    # having "no shipped caller" after --queue --queue-record began calling it.
+    #
+    # SHIPPED callers only, matching the distinction this whole audit is built
+    # on. Something reachable solely from experiments is genuinely still
+    # unwired from the product's point of view, and acknowledging that is the
+    # entry doing its job.
+    stale = [n for n in ACKNOWLEDGED_DEAD
+             if any(Path(c).name in SHIPPED for c in refs.get(n, set()))]
+    if stale:
+        print(f"\n  FAIL: {len(stale)} ACKNOWLEDGED_DEAD entr(ies) name code "
+              f"that a SHIPPED module now calls:\n")
+        for name in stale:
+            sites = sorted(c for c in refs[name]
+                           if Path(c).name in SHIPPED)[:3]
+            print(f"    {name}()  now called from: {', '.join(sites)}")
+        print("\n  An acknowledgement is a claim about the present. When the")
+        print("  function gets a shipped caller, DELETE the entry -- the code")
+        print("  is live and the entry is now a false statement about it.")
+        return 1
+
+    print("\n  OK    every uncalled shipped function is accounted for,")
+    print("  and every acknowledgement is still true.")
     print("  The list is only as good as the reasons in it; read them when")
     print("  deciding what to wire next.")
     if unread:
