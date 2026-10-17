@@ -461,6 +461,42 @@ class FeedbackStore:
                 reason     TEXT NOT NULL DEFAULT '',
                 source     TEXT NOT NULL DEFAULT ''
             );
+
+            -- The decisions ledger: one row per candidate the system JUDGED,
+            -- whether or not it was pushed.
+            --
+            -- This is the only table where a human writes ground truth.
+            -- `label` is the explicit review answer (1 = worth interrupting,
+            -- 0 = not) and it is deliberately NULL until somebody says so --
+            -- an unreviewed decision is not a negative one, and defaulting
+            -- it to 0 would let "nobody has looked yet" masquerade as
+            -- "the wearer said no".
+            --
+            -- `observable` is the anti-starvation guard, and it comes from
+            -- the glasses' own wear-state telemetry rather than from a
+            -- judgement. With the glasses in a case, "never examined" is
+            -- missing data, not a negative; without this column a review
+            -- queue teaches itself that cards in a pocket are worthless.
+            --
+            -- `already_knew` exists because "true AND already known" is a
+            -- different outcome from "true AND novel": the first means the
+            -- laptop already did the job.
+            CREATE TABLE IF NOT EXISTS decisions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at   REAL    NOT NULL,
+                decision     TEXT    NOT NULL,   -- 'push' | 'queue'
+                cls          TEXT    NOT NULL,
+                source       TEXT    NOT NULL DEFAULT '',
+                line         TEXT    NOT NULL DEFAULT '',
+                gate         TEXT    NOT NULL DEFAULT '',
+                reason       TEXT    NOT NULL DEFAULT '',
+                observable   INTEGER NOT NULL DEFAULT 1,
+                label        INTEGER CHECK (label IN (0,1)),
+                already_know INTEGER CHECK (already_know IN (0,1)),
+                reviewed_at  REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_decisions_unlabelled
+                ON decisions(label, decision, created_at);
             """
             )
             self._conn.commit()
@@ -923,7 +959,15 @@ class FeedbackStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (now, cls, source, digest, outcome),
             )
-            return int(cur.lastrowid)
+            row = int(cur.lastrowid)
+        # Explicit commit, like add_card/add_event/set_meta above.
+        # This connection opens in DEFERRED mode, so an uncommitted
+        # write is invisible to any other process and is lost when
+        # the connection closes -- while looking perfectly correct to
+        # every test that runs inside one process. It took a review
+        # and a CLI run to notice; the suite never would have.
+        self._conn.commit()
+        return row
 
     @_synchronized
     def settle_push(self, row_id: int, outcome: str) -> bool:
@@ -939,7 +983,14 @@ class FeedbackStore:
                 "UPDATE push_events SET outcome = ? WHERE id = ?",
                 (outcome, int(row_id)),
             )
-            return True
+        # Explicit commit, like add_card/add_event/set_meta above.
+        # This connection opens in DEFERRED mode, so an uncommitted
+        # write is invisible to any other process and is lost when
+        # the connection closes -- while looking perfectly correct to
+        # every test that runs inside one process. It took a review
+        # and a CLI run to notice; the suite never would have.
+        self._conn.commit()
+        return True
 
     @_synchronized
     def push_counts(self, now: Optional[float] = None,
@@ -994,12 +1045,28 @@ class FeedbackStore:
                 "source=excluded.source",
                 (cls, now, now + float(seconds), detail, source),
             )
+        # Explicit commit, like add_card/add_event/set_meta above.
+        # This connection opens in DEFERRED mode, so an uncommitted
+        # write is invisible to any other process and is lost when
+        # the connection closes -- while looking perfectly correct to
+        # every test that runs inside one process. It took a review
+        # and a CLI run to notice; the suite never would have.
+        self._conn.commit()
+
 
     @_synchronized
     def clear_suspension(self, cls: str) -> None:
         """Un-suspend early. Operator action, never automatic."""
         with self._lock:
             self._conn.execute("DELETE FROM suspensions WHERE cls = ?", (cls,))
+        # Explicit commit, like add_card/add_event/set_meta above.
+        # This connection opens in DEFERRED mode, so an uncommitted
+        # write is invisible to any other process and is lost when
+        # the connection closes -- while looking perfectly correct to
+        # every test that runs inside one process. It took a review
+        # and a CLI run to notice; the suite never would have.
+        self._conn.commit()
+
 
     @_synchronized
     def suspensions(self) -> list[dict]:
@@ -1055,6 +1122,164 @@ class FeedbackStore:
             except (TypeError, ValueError):
                 continue
         return out
+
+    # -- the decisions ledger ----------------------------------------------
+    #
+    # The only place a human writes ground truth. Everything else in the
+    # system is a proxy, and this is the part that is not.
+
+    @_synchronized
+    def record_decision(self, *, decision: str, cls: str,
+                        source: str = "", line: str = "",
+                        gate: str = "", reason: str = "",
+                        observable: bool = True,
+                        ts: Optional[float] = None) -> int:
+        """
+        Record that a candidate was JUDGED, pushed or not.
+
+        Queued rows are recorded as deliberately as pushed ones. They are the
+        population `queue_worth_rate` is computed over, so dropping them would
+        make that metric unmeasurable -- and the queue is where most of the
+        system's decisions land, given that only three classes can interrupt
+        at all.
+
+        `observable` defaults True. Callers that know better should say so;
+        the default is the optimistic one because a card shown to a wearer who
+        was wearing the glasses is normally observable, and the failure being
+        guarded against is the opposite one.
+        """
+        now = time.time() if ts is None else float(ts)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO decisions (created_at, decision, cls, source, "
+                "line, gate, reason, observable) VALUES (?,?,?,?,?,?,?,?)",
+                (now, decision, cls, source, line[:120], gate, reason[:200],
+                 1 if observable else 0),
+            )
+            row = int(cur.lastrowid)
+        # Explicit commit, like add_card/add_event/set_meta above.
+        # This connection opens in DEFERRED mode, so an uncommitted
+        # write is invisible to any other process and is lost when
+        # the connection closes -- while looking perfectly correct to
+        # every test that runs inside one process. It took a review
+        # and a CLI run to notice; the suite never would have.
+        self._conn.commit()
+        return row
+
+    @_synchronized
+    def set_label(self, row_id: int, label: int, *,
+                  already_knew: Optional[bool] = None,
+                  ts: Optional[float] = None) -> bool:
+        """A human's answer. This is the ground truth; nothing else is."""
+        if label not in (0, 1):
+            raise ValueError(f"label must be 0 or 1, got {label!r}")
+        now = time.time() if ts is None else float(ts)
+        fields = ["label = ?", "reviewed_at = ?"]
+        args: list = [int(label), now]
+        if already_knew is not None:
+            fields.append("already_know = ?")
+            args.append(1 if already_knew else 0)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE decisions SET {', '.join(fields)} WHERE id = ?",
+                (*args, int(row_id)),
+            )
+        # Explicit commit, like add_card/add_event/set_meta above.
+        # This connection opens in DEFERRED mode, so an uncommitted
+        # write is invisible to any other process and is lost when
+        # the connection closes -- while looking perfectly correct to
+        # every test that runs inside one process. It took a review
+        # and a CLI run to notice; the suite never would have.
+        self._conn.commit()
+        return True
+
+    @_synchronized
+    def unlabelled(self, *, decision: Optional[str] = None,
+                   limit: int = 30, since_days: float = 30.0
+                   ) -> list[dict]:
+        """
+        Decisions still awaiting a human answer, oldest first.
+
+        Oldest first on purpose: a review queue that serves newest-first
+        guarantees the label set drifts toward whatever happened today and
+        silently drops the backlog that would show whether a source class was
+        consistently bad.
+        """
+        cutoff = time.time() - since_days * 86400.0
+        sql = ("SELECT id, created_at, decision, cls, source, line, gate, "
+               "reason, observable FROM decisions "
+               "WHERE label IS NULL AND created_at >= ?")
+        args: list = [cutoff]
+        if decision:
+            sql += " AND decision = ?"
+            args.append(decision)
+        sql += " ORDER BY created_at LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    @_synchronized
+    def label_stats(self) -> dict:
+        """
+        Everything the policy axes read, in one pass.
+
+        The split here is the important part, and it is the arithmetic from
+        documents/21:
+
+          queue_worth_rate, n_labels, label_days
+              over QUEUED items only. A queued item labelled "not worth" is a
+              true negative BY CONSTRUCTION -- the system declined and the
+              wearer agrees -- so these measure whether the queue was worth
+              glancing at, which is exactly what g1_model asks.
+
+          clean_pushes
+              over PUSHED items only, as a STREAK that resets on the first
+              false push. A cumulative count is not evidence: a gate that
+              fires 299 times and is wrong 5 times has demonstrated 98.4%
+              precision, not 99%. And counting queued rows here would let the
+              axis reach 299 on pure noise, because nothing was interrupted.
+        """
+        with self._lock:
+            queued = self._conn.execute(
+                "SELECT label, observable FROM decisions "
+                "WHERE decision = 'queue' AND label IS NOT NULL"
+            ).fetchall()
+            pushed = self._conn.execute(
+                "SELECT label, already_know FROM decisions "
+                "WHERE decision = 'push' AND label IS NOT NULL "
+                "ORDER BY reviewed_at, id"
+            ).fetchall()
+            days = self._conn.execute(
+                "SELECT COUNT(DISTINCT date(created_at, 'unixepoch')) AS d "
+                "FROM decisions WHERE label IS NOT NULL"
+            ).fetchone()["d"]
+
+        n_labels = len(queued) + len(pushed)
+        worth = (sum(r["label"] for r in queued) / len(queued)) if queued else None
+
+        # Streak: walk the pushes newest-first until one is false. An item
+        # the wearer already knew counts as a mis-fire for this purpose: the
+        # gate interrupted them about something they did not need.
+        streak = 0
+        for r in reversed(pushed):
+            if r["label"] == 0 or r["already_know"] == 1:
+                break
+            streak += 1
+
+        return {
+            "n_labels": n_labels,
+            "label_days": int(days or 0),
+            "queue_worth_rate": worth,
+            "queue_labelled": len(queued),
+            # None, not 0, when no push has been labelled. A streak of zero
+            # out of zero pushes is arithmetically true and evidentially
+            # useless: reporting it as 0 says "measured, and every push was
+            # wrong", when the truth is "none has been reviewed". The axis
+            # reads a missing metric as unresolved, which is correct.
+            "clean_pushes": (streak if pushed else None),
+            "push_labelled": len(pushed),
+        }
 
     def event_total(self) -> int:
         """Total reactions recorded; the gate for the higher-level pass."""

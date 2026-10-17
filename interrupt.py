@@ -522,6 +522,37 @@ def evidence_from_store(store) -> tuple["Budget", dict]:
     else:
         mark("drill_miss_rate", None, source=False)
 
+    # -- the decisions ledger: the ONLY human ground truth in the system ----
+    #
+    # Everything else here is a proxy: taps, dismissals, silence. This is the
+    # part that is not, which is why it is the part that can move an axis.
+    #
+    # `label_stats` deliberately keeps the two families apart. Queued labels
+    # feed queue_worth_rate / n_labels / label_days, because a queued item
+    # labelled "not worth" is a true negative BY CONSTRUCTION and the
+    # question there is "was the queue worth glancing at". Pushed labels feed
+    # clean_pushes as a RESETTING streak, because a cumulative count would
+    # let 299 fires with 5 wrong demonstrate 98.4% precision and call it 99%.
+    #
+    # A stat of None means "no labels yet", which is NOT the same as zero --
+    # see Budget.evidence(). An axis fed a fabricated 0 reads as measured and
+    # found wanting, rather than never measured.
+    try:
+        stats = store.label_stats()
+    except Exception as exc:                       # noqa: BLE001
+        log.warning("could not read label stats: %s", exc)
+        stats = {}
+
+    budget.n_labels = stats.get("n_labels") or None
+    budget.label_days = stats.get("label_days") or None
+    budget.queue_worth_rate = stats.get("queue_worth_rate")
+    budget.clean_pushes = stats.get("clean_pushes")
+    for name in ("label_days", "n_labels", "clean_pushes"):
+        mark(name, stats.get(name),
+             source=bool(stats.get(name)) or stats.get("n_labels", 0) > 0)
+    mark("queue_worth_rate", stats.get("queue_worth_rate"),
+         source=stats.get("queue_worth_rate") is not None)
+
     # -- push budget: counted from recorded attempts, never accumulated ----
     #
     # This used to be `budget.pushes_last_hour`, a counter that `spend()`
@@ -545,16 +576,14 @@ def evidence_from_store(store) -> tuple["Budget", dict]:
         prov["pushes_last_hour"] = "unavailable: %s" % exc
         prov["pushes_today"] = "unavailable: %s" % exc
 
-    # -- the four with no source at all ------------------------------------
+    # -- the one that still has no source ----------------------------------
     #
-    # Every one of these needs LABELS: a human or a trusted judge saying
-    # "this card was/was not worth interrupting me for". `sim/ledger.py` has
-    # `label()` and it is called only by experiments/soak.py, against a
-    # VirtualWearer. There is no CLI that produces a label and no shipped code
-    # that reads one. Until both exist these stay absent on purpose.
-    for name in ("label_days", "clean_pushes", "n_labels", "queue_worth_rate",
-                 "rho"):
-        prov[name] = "no source"
+    # rho needs a calibration walk on real hardware to measure the head-up
+    # threshold. It is the only remaining metric with nothing behind it, and
+    # it stays ABSENT rather than becoming a fabricated 0 -- which would read
+    # as "we measured and the threshold does not exist" rather than "nobody
+    # has walked yet".
+    prov["rho"] = "no source: needs the calibration walk on hardware"
 
     return budget, prov
 

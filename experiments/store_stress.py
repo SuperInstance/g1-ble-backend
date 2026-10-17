@@ -152,12 +152,94 @@ def main() -> int:
             f"{code.stderr.strip().splitlines()[-1] if code.stderr.strip() else ''}"
         )
 
+    print("\n6. every writer commits, not just the ones tests exercise")
+    # This section exists because six writers did NOT commit and every test
+    # still passed. The store opens its connections in SQLite's DEFERRED mode,
+    # so an uncommitted write is invisible to any other process and is rolled
+    # back when the connection closes -- and it is completely invisible to a
+    # test that writes and reads inside one process.
+    #
+    # It was found by running the review CLI in a second process and finding
+    # an empty table that the seeding process had reported as four rows. The
+    # suite could never have caught it, which is the whole point: durability
+    # is a property ACROSS processes, so the check has to cross one too.
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "commit.db"
+        probe = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from memory import FeedbackStore\n"
+            "s = FeedbackStore(%r)\n"
+            "print(len(s.unlabelled()))\n"
+            "s.close()\n" % (str(ROOT), str(db))
+        )
+        st = FeedbackStore(db)
+        writers = {
+            "record_push": lambda: st.record_push("meeting", text="t"),
+            "record_decision": lambda: st.record_decision(decision="queue",
+                                                           cls="digest"),
+            "set_label": (lambda: st.set_label(
+                st.record_decision(decision="queue", cls="digest"), 1)),
+            "record_misfire": lambda: st.record_misfire("device"),
+            "clear_suspension": lambda: st.clear_suspension("device"),
+            "settle_push": lambda: st.settle_push(1, "delivered"),
+        }
+        for name, write in writers.items():
+            write()
+        st.close()
+
+        # Read it all back in a SEPARATE process. If any writer left its
+        # transaction open, this is where it shows.
+        r = subprocess.run([sys.executable, "-c", probe],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            failures.append(f"child process failed: {r.stderr.strip()[-120:]}")
+        else:
+            # Count TOTAL rows, not unlabelled ones: set_label labels a row,
+            # so the unlabelled count legitimately drops. The first version of
+            # this check asserted on unlabelled and failed on correct code.
+            probe_path = Path(tmp) / "_probe.py"
+            probe_path.write_text(
+                "import sys\n"
+                f"sys.path.insert(0, {str(ROOT)!r})\n"
+                "from memory import FeedbackStore\n"
+                "db = sys.argv[1]\n"
+                "s = FeedbackStore(db)\n"
+                "with s._lock:\n"
+                "    total = s._conn.execute("
+                "'SELECT COUNT(*) c FROM decisions').fetchone()['c']\n"
+                "    lab = s._conn.execute("
+                "'SELECT COUNT(*) c FROM decisions WHERE label IS NOT NULL'"
+                ").fetchone()['c']\n"
+                "print(len(s.push_rows(since_days=1)), total, lab)\n"
+                "s.close()\n"
+            )
+            pushed = subprocess.run(
+                [sys.executable, str(probe_path), str(db)],
+                capture_output=True, text=True, timeout=60)
+            parts = pushed.stdout.split()
+            if len(parts) == 3:
+                n_push, total, labelled = (int(x) for x in parts)
+                if n_push < 1:
+                    failures.append("record_push did not commit across a process")
+                if total < 2:
+                    failures.append(
+                        f"record_decision did not commit across a process "
+                        f"({total} rows, expected >=2)")
+                if labelled < 1:
+                    failures.append("set_label did not commit across a process")
+                print(f"  cross-process: {n_push} push rows, {total} decisions, "
+                      f"{labelled} labelled - all committed")
+            else:
+                failures.append(f"could not read child output: {pushed.stdout!r} "
+                                f"{pushed.stderr.strip()[-160:]}")
+
     print()
     if failures:
         for f in failures:
             print(f"FAIL  {f}")
         return 1
-    print("OK    400/400 writes durable, ids unique and present, close is safe")
+    print("OK    400/400 writes durable, ids unique, close is safe, and every "
+          "writer commits")
     return 0
 
 

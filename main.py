@@ -553,6 +553,63 @@ async def run(args: argparse.Namespace) -> int:
         store.close()
         return 0
 
+    if args.review:
+        from memory import FeedbackStore as RevStore
+
+        rev = RevStore(args.store)
+        pending = rev.unlabelled(decision=args.review, limit=args.review_n)
+
+        print("Review — the only ground truth this system has.\n")
+        print("  y  worth interrupting        n  not worth it")
+        print("  k  worth it, but I already knew    s  skip")
+        print("  q  stop\n")
+
+        if not pending:
+            print("  nothing waiting. Nothing is ever dropped from the queue;")
+            print("  this is empty because nothing has been judged yet.")
+            rev.close()
+            return 0
+
+        print(f"  {len(pending)} to review "
+              f"(oldest first — a newest-first queue drifts to whatever "
+              f"happened today and hides a consistently bad source)\n")
+        labelled = 0
+        for row in pending:
+            mark = "" if row["observable"] else "   [NOT OBSERVABLE — the "
+            mark += "glasses were off your face]"
+            print(f"  #{row['id']}  {row['decision']:<5} {row['cls']:<12} "
+                  f"{row['source'][:10]:<10}")
+            print(f"       {row['line'][:78]}")
+            if row["gate"]:
+                print(f"       gated: {row['gate']} — {row['reason'][:56]}")
+            if mark:
+                print(mark)
+            try:
+                answer = input("       > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  stopped.")
+                break
+            if answer == "q":
+                print("  stopped.")
+                break
+            if answer == "s":
+                continue
+            if answer == "k":
+                rev.set_label(row["id"], 1, already_knew=True)
+                labelled += 1
+                continue
+            if answer in ("y", "n"):
+                rev.set_label(row["id"], 1 if answer == "y" else 0)
+                labelled += 1
+                continue
+            print("       (unrecognised; skipped)")
+
+        print(f"\n  labelled {labelled} of {len(pending)}")
+        stats = rev.label_stats()
+        print(f"  {stats}")
+        rev.close()
+        return 0
+
     if args.suspend or args.reinstate or args.kill_switch:
         import interrupt as interrupt_mod
         from memory import FeedbackStore as SuspStore
@@ -632,7 +689,7 @@ async def run(args: argparse.Namespace) -> int:
         for metric in ("label_days", "clean_pushes", "n_labels",
                        "queue_worth_rate", "rho"):
             if not any(metric in m for m in values.values()):
-                print(f"  {metric:<20}{prov.get(metric, 'no source'):<14}"
+                print(f"  {metric:<20}{prov.get(metric, 'no source')[:13]:<14}"
                       f"—  <-- ABSENT, not zero")
 
         print(f"\n  policy as resolved:\n{_indent(pol.report(), '    ')}")
@@ -997,6 +1054,19 @@ def build_parser() -> argparse.ArgumentParser:
              "by default: measured 9-13x slower at identical answer relevance "
              "and no measured protection against invented numbers. Turn this "
              "on to compare, or to fall back if one-stage quality regresses.",
+    )
+    parser.add_argument(
+        "--review", choices=("push", "queue"), nargs="?", const="queue",
+        default=None,
+        help="review decided candidates and write ground-truth labels. This "
+             "is the ONLY place a human writes the system's truth; every "
+             "other signal (taps, dismissals, silence) is a proxy. Costs no "
+             "attention on the glasses -- it runs on a terminal.",
+    )
+    parser.add_argument(
+        "--review-n", type=int, default=20, metavar="N",
+        help="how many unlabelled decisions --review shows (default: 20). "
+             "Oldest first on purpose.",
     )
     parser.add_argument(
         "--kill-switch", choices=("arm", "disarm", "show"), default=None,
