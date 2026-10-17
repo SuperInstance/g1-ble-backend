@@ -445,6 +445,22 @@ class FeedbackStore:
                 outcome   TEXT    NOT NULL DEFAULT 'attempted'
             );
             CREATE INDEX IF NOT EXISTS idx_push_ts ON push_events(ts);
+
+            -- Auto-suspend state (documents/07: one mis-fire mutes that
+            -- source class for 24h).
+            --
+            -- PRIMARY KEY on cls, deliberately: one row per class, replaced
+            -- on each mis-fire. A table that could hold several rows per
+            -- class would let two mis-fires stack into a 48h suspension by
+            -- accident, which is the kind of drift that makes a limit look
+            -- stricter than it was written to be.
+            CREATE TABLE IF NOT EXISTS suspensions (
+                cls        TEXT PRIMARY KEY,
+                since_ts   REAL NOT NULL,
+                until_ts   REAL NOT NULL,
+                reason     TEXT NOT NULL DEFAULT '',
+                source     TEXT NOT NULL DEFAULT ''
+            );
             """
             )
             self._conn.commit()
@@ -955,6 +971,90 @@ class FeedbackStore:
                 "FROM push_events WHERE ts >= ? ORDER BY ts", (cutoff,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    @_synchronized
+    def record_misfire(self, cls: str, *, source: str = "",
+                       detail: str = "", seconds: float = 24 * 3600.0,
+                       ts: Optional[float] = None) -> None:
+        """
+        Suspend one source CLASS for ``seconds``. The documented mis-fire path.
+
+        REPLACES rather than accumulates. The rule says 24 hours from the
+        mis-fire, and a second mis-fire restarting the clock is the honest
+        reading -- the wearer has not forgiven anything since. Stacking rows
+        to mean "two strikes, 48 hours" is a rule nobody wrote down.
+        """
+        now = time.time() if ts is None else float(ts)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO suspensions (cls, since_ts, until_ts, reason, "
+                "source) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(cls) DO UPDATE SET since_ts=excluded.since_ts, "
+                "until_ts=excluded.until_ts, reason=excluded.reason, "
+                "source=excluded.source",
+                (cls, now, now + float(seconds), detail, source),
+            )
+
+    @_synchronized
+    def clear_suspension(self, cls: str) -> None:
+        """Un-suspend early. Operator action, never automatic."""
+        with self._lock:
+            self._conn.execute("DELETE FROM suspensions WHERE cls = ?", (cls,))
+
+    @_synchronized
+    def suspensions(self) -> list[dict]:
+        """Every suspension row, expired or not. Callers filter by time."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT cls, since_ts, until_ts, reason, source "
+                "FROM suspensions ORDER BY cls"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    @_synchronized
+    def note_unexamined(self, cls: str, *, count: int = 1,
+                        ts: Optional[float] = None) -> int:
+        """
+        Record that pushes went unexamined. DELIBERATELY DOES NOT SUSPEND.
+
+        This method exists so the temptation has somewhere harmless to go. The
+        instinct on seeing 200 unseen pushes is to treat them as 200 failures,
+        and doing so would starve a quiet source class into permanent silence
+        -- the exact failure documents/07 warns about, where the wearer
+        eventually stops reading anything at all.
+
+        Absence of a reaction is not evidence of a bad push. It is usually
+        evidence that nobody was looking: the glasses were in a case, a
+        dashboard was open, the wearer was asleep. Habituation makes it weaker
+        still. So the count is kept, because it is genuinely useful for a
+        review ("these 40 were never looked at"), and nothing is suspended.
+
+        Returns the running count for this class.
+        """
+        now = time.time() if ts is None else float(ts)
+        key = f"unexamined:{cls}"
+        try:
+            current = int(self.get_meta(key, "0") or 0)
+        except (TypeError, ValueError):
+            current = 0
+        total = current + max(1, int(count))
+        self.set_meta(key, str(total))
+        return total
+
+    @_synchronized
+    def unexamined_counts(self) -> dict[str, int]:
+        """Un-examined push counts per class. For review triage, not for gating."""
+        out: dict[str, int] = {}
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'unexamined:%'"
+            ).fetchall()
+        for r in rows:
+            try:
+                out[r["key"].split(":", 1)[1]] = int(r["value"])
+            except (TypeError, ValueError):
+                continue
+        return out
 
     def event_total(self) -> int:
         """Total reactions recorded; the gate for the higher-level pass."""

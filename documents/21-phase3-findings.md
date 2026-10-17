@@ -212,16 +212,82 @@ building with no hardware:
 |---|---|---|
 | 0 | decision + dry run | done |
 | 1 | budget counted from durable timestamps | **done this commit** |
-| 2 | kill-switch + auto-suspend state machine, shipped dormant | next |
+| 2 | kill-switch + auto-suspend state machine, shipped dormant | **done this commit** |
 | 3 | a `LinkStatus` seam — gate logic tested against a fake link | next |
 | 4 | **run the existing CLI on real hardware** | not code — a session |
 | 5 | live push, operator-armed, one class | not until 4 |
 | 6 | unattended | not until 5 |
 
-Rungs 2 and 3 are pure state machines and testable now. **Rung 4 is not an
-engineering increment** — `main.py --text --require-ack --hold` already exists
-and one session with a G1 on a BlueZ host retires more uncertainty than every
-document in `documents/`.
+## Rung 2, built: stopping, and quieting a bad source
+
+Two rules the panel wrote down and nobody built:
+
+> **documents/07:** "one mis-fire auto-suspends that source class for 24
+> hours — not three. Trust collapses on the second bad interruption."
+> **documents/13:** "one `n` in review suspends that push type for 24 h."
+
+### The kill-switch is a file, not a signal
+
+`~/.g1/pushing.armed`, re-read on every cycle rather than cached at startup.
+The reason is the failure mode it exists for: a process that has stopped
+answering the terminal that started it. A stop control you can only reach
+through that terminal is not a stop control.
+
+Absence of the file means **disarmed**. If the check fails to run — missing
+file, unreadable, exception — the safe direction is silence, and that is the
+direction coded.
+
+A TouchBar gesture would be better UX and is deliberately **not** built: it
+depends on `0xF5` decode correctness, which is unverified on hardware, and
+`0x18`'s meaning is unknown. Capture first; bind later.
+
+### The anti-starvation constraint is the whole problem
+
+The panel also wrote that signal starvation is what kills this product. So a
+suspend mechanism is dangerous by construction, and the naive version is a
+way to mute yourself permanently. Four properties, each asserted in
+`experiments/suspend_gate.py`:
+
+| # | property | asserted by |
+|---|---|---|
+| 1 | **Absence never suspends.** 200 never-examined pushes suspend nothing. | §2 |
+| 2 | **Transport failure never suspends.** 50 undelivered pushes suspend nothing. | §2 |
+| 3 | **One explicit refusal suspends one class, for 24h.** | §2, §3 |
+| 4 | **Expiry is unconditional.** A second refusal restarts the clock; nothing else extends it. | §3 |
+
+Property 2 is the one worth arguing for. If a dead radio counted as a bad
+source, a flaky link would mute meetings, battery alerts *and* blocked jobs
+at once — which is precisely how an auto-suspend rule becomes a global mute by
+accident, and precisely the failure the budget rule was supposed to prevent.
+Transport failures route to link health, which does not exist yet.
+
+There is no escalation path from a class suspension to a global mute. Silence
+is already the default posture, so escalation would only ever remove
+information.
+
+And suspended means **queued**, not dropped — verified with a control arm,
+because the first version of that check passed without reaching the
+suspension gate at all (it queued on the budget gate instead, since the test
+budget had two pushes on it). A class muted for a day is quiet for a day, not
+gone for a day.
+
+The 24 hours is a **named constant with an honest origin**, not a derived
+number: `sim/wearer.py` models trust decaying per bad interruption and
+recovering at 0.03/day, and `sim/README.md` records that the simulator
+*deliberately violates* this rule. It is a choice the panel argued for.
+
+### Operator surface
+
+```
+--kill-switch {arm,disarm,show}   the stop control
+--suspend CLASS --suspend-reason R suspend one class for 24h
+--reinstate CLASS                  clear early; operator action, never automatic
+```
+
+`--suspend digest` **exits 2 with an explanation**: `digest` can never
+interrupt, so suspending it would be a no-op that looks like a safety feature.
+That is the same instinct as removing `enforce_word_budget` — a control that
+does nothing is worse than no control, because it is believed in.
 
 What must be true that **cannot** be checked offline, named so it is not
 smoothed over later:

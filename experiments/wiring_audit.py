@@ -195,6 +195,21 @@ ACKNOWLEDGED_DEAD: dict[str, tuple[str, str]] = {
         "A --pushes command, or the review UI. Until then it is exercised by "
         "experiments/interrupt_gate.py only.",
     ),
+    "note_unexamined": (
+        "memory.py: counts pushes nobody examined, and deliberately "
+        "suspends nothing. It exists so the temptation has somewhere "
+        "harmless to go -- 200 unseen pushes look like 200 failures, and "
+        "treating them as such starves a quiet source class into permanent "
+        "silence, the exact failure documents/07 warns about.",
+        "A review UI that needs to show 'these 40 were never looked at'. "
+        "Read by experiments/suspend_gate.py only so far.",
+    ),
+    "unexamined_counts": (
+        "memory.py: reads back what note_unexamined() wrote. For review "
+        "triage. Not for gating -- absence of a reaction must never gate "
+        "anything.",
+        "The review UI, with note_unexamined().",
+    ),
     "as_json": (
         "interrupt.py: the documented outbox format writer. Used by the "
         "round-trip check in experiments/interrupt_gate.py and intended for "

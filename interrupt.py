@@ -51,6 +51,7 @@ import json
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -382,6 +383,7 @@ def plan(
     budget: Optional[Budget] = None,
     policy: Optional[Policy] = None,
     overrides: Optional[dict] = None,
+    store=None,
     now: Optional[datetime] = None,
 ) -> list[Verdict]:
     """
@@ -400,6 +402,12 @@ def plan(
     --set-policy``. They are applied on top of every re-resolution, so a
     forced axis and a simulated-evidence axis can coexist.
 
+    ``store``, when given, supplies the auto-suspend state (documents/07:
+    one mis-fire mutes that source class for 24h). It is optional and reads
+    once, before the loop, because a suspended candidate must come back
+    QUEUED rather than dropped -- the queue is the safety net, so a class
+    that is quiet for a day is quiet for a day, not gone for a day.
+
     Re-resolving after each push is the point: five eligible candidates in one
     batch must produce at most ``MAX_PUSHES_PER_HOUR`` pushes between them, and
     the only way to get that from a constraint that already lives in
@@ -410,6 +418,13 @@ def plan(
     ordered = rank(candidates, now)
     verdicts: list[Verdict] = []
 
+    # Suspensions are read ONCE, not per candidate: they cannot change while
+    # this loop runs, and re-reading the store for every item would put a
+    # database query on the path of every decision.
+    suspended_classes: dict[str, float] = {}
+    if store is not None:
+        suspended_classes = suspension_state(store, now.timestamp())
+
     for cand in ordered:
         pol = policy if policy is not None else resolve(
             budget.evidence(), overrides)
@@ -419,6 +434,26 @@ def plan(
             d = pol.evidence_for("push_enabled")
             why = d.reason if d else "push_enabled is off"
             verdicts.append(Verdict(cand, "queue", why, "budget/axis"))
+            continue
+
+        # 1b. SUSPENDED source class (documents/07: one mis-fire, 24h).
+        #
+        # Checked after the axis and before eligibility, so the reason
+        # reported is the useful one: "this class is quietened" rather than a
+        # G2 rule that may or may not have passed anyway.
+        #
+        # Queued, never dropped. That is the whole invariant -- a suspended
+        # candidate is ineligible, and ineligible already means queue. The
+        # queue remains the safety net, so a class that is muted for a day is
+        # quiet for a day, not gone for a day.
+        suspended = suspended_classes
+        if cand.cls in suspended:
+            until = suspended[cand.cls]
+            verdicts.append(Verdict(
+                cand, "queue",
+                f"source class {cand.cls!r} suspended until "
+                f"{datetime.fromtimestamp(until, timezone.utc):%Y-%m-%d %H:%M}",
+                "suspended"))
             continue
 
         # 2. G2 eligibility
@@ -522,6 +557,80 @@ def evidence_from_store(store) -> tuple["Budget", dict]:
         prov[name] = "no source"
 
     return budget, prov
+
+
+# ---------------------------------------------------------------------------
+# Stopping, and quieting a bad source
+# ---------------------------------------------------------------------------
+#
+# Two rules the design wrote down and never built:
+#   documents/07 "one mis-fire auto-suspends that source class for 24 hours
+#                 -- not three. Trust collapses on the second bad
+#                 interruption."
+#   documents/13 "one `n` in review suspends that push type for 24 h."
+#
+# Built here as pure state machines with no BLE and no LED, because a rule
+# that is neither wired nor tested is indistinguishable from a rule that does
+# not exist.
+
+# Where the kill-switch lives. Re-read on every decision cycle rather than
+# cached at startup, so a process that has stopped answering its terminal can
+# still be stopped. NOT in policy.json: that file is for axis overrides and
+# is only read when the policy is resolved, which happens once.
+KILL_SWITCH_PATH = Path.home() / ".g1" / "pushing.armed"
+
+# The panel's number, named so it can be argued with. It is a CHOICE, not a
+# constant: sim/wearer.py models trust decaying per bad interruption and
+# recovering at 0.03/day, and sim/README.md records that the simulator
+# deliberately violates this rule -- "the design assumption I violate most
+# directly". Nothing here is derived from data, and pretending otherwise
+# would be the same mistake as calling queue_worth_rate a measurement of a
+# wearer when it is a measurement of a simulation.
+SUSPEND_SECONDS = 24 * 3600.0
+
+# Only these can be suspended, because only these can interrupt. Suspending
+# something that could never push is a no-op that looks like a safety feature.
+SUSPENDABLE = PUSHABLE
+
+
+def kill_switch_armed(path: Path) -> bool:
+    """
+    True when the file says pushing is permitted.
+
+    Deliberately a FILE and not a signal or a flag argument. The failure this
+    guards against is a process that has stopped responding to the terminal
+    that started it, so the stop control has to live somewhere the operator
+    can reach without that terminal. Absence of the file means DISARMED:
+    if the check fails to run, the safe direction is silence.
+    """
+    try:
+        return path.exists() and path.read_text().strip().lower() in (
+            "armed", "1", "true", "yes")
+    except OSError as exc:
+        log.warning("kill switch unreadable (%s); treating as DISARMED", exc)
+        return False
+
+
+def suspension_state(store, now: Optional[float] = None) -> dict:
+    """
+    ``{source class: expiry epoch}``, expired entries dropped.
+
+    Returns nothing for a class whose suspension has lapsed, and never
+    returns "suspended until further notice". Rule 2 of the anti-starvation
+    design: expiry is unconditional, because a class that stays muted
+    precisely because nothing is happening to it is muted forever.
+    """
+    now = time.time() if now is None else float(now)
+    try:
+        rows = store.suspensions()
+    except Exception as exc:                       # noqa: BLE001
+        log.warning("could not read suspensions: %s", exc)
+        return {}
+    alive: dict[str, float] = {}
+    for r in rows:
+        if r.get("until_ts", 0) > now:
+            alive[r["cls"]] = float(r["until_ts"])
+    return alive
 
 
 def summarize(verdicts: list[Verdict]) -> dict:

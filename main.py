@@ -92,6 +92,11 @@ DEFAULT_TEST_TEXT = "Terminal connection established. System online."
 DEFAULT_HOLD_SECONDS = 30.0
 
 
+def reason_arg(value: str) -> str:
+    """The --suspend-reason value, or a sensible default when not given."""
+    return value or "manual"
+
+
 def _indent(text: str, prefix: str = "  ") -> str:
     """Indent every line of a block, for embedding reports in CLI output."""
     return "\n".join(prefix + line for line in text.splitlines())
@@ -542,6 +547,54 @@ async def run(args: argparse.Namespace) -> int:
         store.close()
         return 0
 
+    if args.suspend or args.reinstate or args.kill_switch:
+        import interrupt as interrupt_mod
+        from memory import FeedbackStore as SuspStore
+
+        susp_store = SuspStore(args.store)
+
+        if args.kill_switch:
+            path = interrupt_mod.KILL_SWITCH_PATH
+            if args.kill_switch == "arm":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("armed")
+                print(f"pushes ARMED (kill switch -> {path})")
+            elif args.kill_switch == "disarm":
+                path.unlink(missing_ok=True)
+                print(f"pushes DISARMED (kill switch -> {path})")
+            else:
+                print(f"kill switch: "
+                      f"{'ARMED' if interrupt_mod.kill_switch_armed(path) else 'DISARMED'}"
+                      f"  ({path})")
+
+        if args.suspend:
+            if args.suspend not in interrupt_mod.SUSPENDABLE:
+                print(f"error: {args.suspend!r} can never interrupt, so "
+                      f"suspending it would be a no-op that looks like safety. "
+                      f"suspendable: {', '.join(interrupt_mod.SUSPENDABLE)}",
+                      file=sys.stderr)
+                return 2
+            susp_store.record_misfire(args.suspend, source="manual",
+                                      detail=reason_arg(args.suspend_reason),
+                                      seconds=interrupt_mod.SUSPEND_SECONDS)
+            print(f"suspended {args.suspend!r} for "
+                  f"{interrupt_mod.SUSPEND_SECONDS / 3600:.0f}h")
+
+        if args.reinstate:
+            susp_store.clear_suspension(args.reinstate)
+            print(f"cleared the suspension on {args.reinstate!r}")
+
+        live = interrupt_mod.suspension_state(susp_store)
+        if live:
+            print("\n  live suspensions:")
+            for cls_name, until in sorted(live.items()):
+                when = datetime.fromtimestamp(until).strftime("%Y-%m-%d %H:%M")
+                print(f"    {cls_name:<14} until {when}")
+        else:
+            print("  no live suspensions")
+        susp_store.close()
+        return 0
+
     if args.evidence:
         import interrupt as interrupt_mod
         from memory import FeedbackStore as EvidenceStore
@@ -934,6 +987,29 @@ def build_parser() -> argparse.ArgumentParser:
              "by default: measured 9-13x slower at identical answer relevance "
              "and no measured protection against invented numbers. Turn this "
              "on to compare, or to fall back if one-stage quality regresses.",
+    )
+    parser.add_argument(
+        "--kill-switch", choices=("arm", "disarm", "show"), default=None,
+        help="arm, disarm, or show the push kill-switch. It is a FILE "
+             "(~/.g1/pushing.armed) re-read every cycle, not a signal, so a "
+             "process that has stopped answering its terminal can still be "
+             "stopped. Absence of the file means DISARMED: if the check "
+             "fails to run, the safe direction is silence.",
+    )
+    parser.add_argument(
+        "--suspend", metavar="CLASS", default=None,
+        help="suspend a source CLASS (meeting, blocked_job, device) for 24h, "
+             "per documents/07: one mis-fire, one class, one day -- not three. "
+             "Refuses classes that can never interrupt, because suspending "
+             "those is a no-op that looks like a safety feature.",
+    )
+    parser.add_argument(
+        "--suspend-reason", default="manual",
+        help="why the class is being suspended; stored for the audit trail.",
+    )
+    parser.add_argument(
+        "--reinstate", metavar="CLASS", default=None,
+        help="clear a suspension early. Operator action, never automatic.",
     )
     parser.add_argument(
         "--evidence", action="store_true",

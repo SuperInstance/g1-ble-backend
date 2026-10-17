@@ -262,8 +262,11 @@ Everything here is reproducible and every number is computed from a real run.
 .venv/bin/python experiments/adaptive_loop.py   # no prompt carries the wearer; heartbeat isolation
 .venv/bin/python experiments/interrupt_gate.py   # push-vs-queue: silence, budget, ordering
 .venv/bin/python experiments/wiring_audit.py     # nothing advertised is left unwired (fails the build)
+.venv/bin/python experiments/suspend_gate.py   # stoppable; one mis-fire mutes one class for 24h
 .venv/bin/python main.py --queue --queue-dir .   # dry-run the interrupt decision on a spool
 .venv/bin/python main.py --evidence              # which policy metrics are real, and which have no source
+.venv/bin/python main.py --kill-switch show      # is pushing armed?
+.venv/bin/python main.py --suspend meeting       # mute one source class for 24h (documents/07)
 
 ollaya serve                                   # required for the two below
 .venv/bin/python experiments/score_corpus.py   # winnow discrimination over 40 candidates
