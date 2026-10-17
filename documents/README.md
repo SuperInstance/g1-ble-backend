@@ -45,19 +45,32 @@ converge on the same answer:
 - `winnow` reads answer-label logits rather than generating text, and returns
   calibrated-looking distributions (verified on a real run).
 
-**NOT settled — an earlier revision of this file wrongly listed these as
-verified. Corrected:**
+**Measured since the first draft — corrections of two of my own claims:**
 
-- *"`winnow:e4b` never fits in VRAM."* 8 GB of model against 6 GB of VRAM
-  **suggests** a problem, but what actually happens — partial offload, CPU
-  offload, or failure — was never measured. The 22 ms warm figure was one
-  observation on one short input, not a benchmark. Being measured now.
+- *"`winnow:e4b` never fits in VRAM" — **I over-corrected this one.** Turn A
+  showed it runs despite being 8 GB on a 6 GB card. Turn B then measured
+  **5826 / 6141 MiB resident: it fits, but consumes 95% of VRAM**, so a 4.7 GB
+  generator cannot be resident alongside it. The accurate statement is
+  **"it fits alone and cannot share."** The operational review's practical
+  concern was right; its literal wording was not.
+- *"~22 ms warm latency" — **wrong by ~5x.** Real: **110 ms sustained**,
+  ~500 ms from an idle GPU, 3.55 s cold load. The 22 ms figure came from one
+  short input and does not reproduce at realistic ~200-token state sizes.
+- *"`tev1` is usable as a fast stage-2 model" — **it is not.** Verified:
+  `"tev1:latest" does not support chat`. It has no chat template, so the
+  OpenAI-compatible endpoint rejects it. It cannot drive the pipeline as-is.
+
+**Still not settled:**
+
 - *"The laptop-in-a-backpack is not a viable all-day host."* Strongly argued by
   the operational review (lid-close suspend, thermal throttling, battery) and
   probably right, but not measured on this hardware.
 - *"The dev host is WSL2, so no Bluetooth."* The absence of `bluetoothctl` and
   of `org.bluez` on D-Bus was observed directly, but a WSL2 USB-passthrough
   dongle is a plausible fix and has not been tried.
+- *Whether head-up/head-down is a usable examination signal.* A design review
+  argued it is the firmware's dashboard gesture; a gait simulation is testing
+  whether walking manufactures false glances.
 
 **Agreed across reviewers:**
 
