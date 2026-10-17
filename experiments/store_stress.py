@@ -27,6 +27,7 @@ Run: ``.venv/bin/python experiments/store_stress.py``
 
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -244,4 +245,118 @@ def main() -> int:
 
     print()
 
+    # ------------------------------------------------------------------
+    # 7. an EXISTING database gets migrated
+    # ------------------------------------------------------------------
+    # Every other section in this file builds a fresh database, which is
+    # exactly why the missing migration went unnoticed: `CREATE TABLE IF NOT
+    # EXISTS` applies cleanly to a new file and silently does nothing to an
+    # old one. The user who already had a store was the only one who hit it,
+    # and they hit it as a bare "no such column: dedup_key".
+    print("7. an existing database is migrated, not abandoned")
+    with tempfile.TemporaryDirectory() as tmp:
+        old = Path(tmp) / "old.db"
+
+        # The `decisions` table exactly as it shipped in 16b94ef: before
+        # gate, reason, observable, dry_run and dedup_key existed.
+        legacy = sqlite3.connect(old)
+        legacy.executescript(
+            """
+            CREATE TABLE decisions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at   REAL NOT NULL,
+                decision     TEXT NOT NULL,
+                cls          TEXT NOT NULL,
+                source       TEXT NOT NULL DEFAULT '',
+                line         TEXT NOT NULL DEFAULT '',
+                label        INTEGER CHECK (label IN (0,1)),
+                already_know INTEGER CHECK (already_know IN (0,1)),
+                reviewed_at  REAL
+            );
+            INSERT INTO decisions (created_at, decision, cls, label, line)
+                VALUES (1.0, 'queue', 'digest', 1, 'typed by a human');
+            """
+        )
+        legacy.commit()
+        before = {r[1] for r in legacy.execute("PRAGMA table_info(decisions)")}
+        legacy.close()
+
+        migrated = FeedbackStore(old)
+        after = {r[1] for r in migrated._conn.execute(
+            "PRAGMA table_info(decisions)")}
+
+        missing = {c for _, c, _ in FeedbackStore._ADDED_COLUMNS}
+        still_missing = missing - after
+        if still_missing:
+            failures.append(
+                f"migration left columns absent on {old.name}: "
+                f"{sorted(still_missing)}")
+        print(f"  ok   {len(before)} columns -> {len(after)}; "
+              f"added {len(after - before)}")
+
+        # The column that matters most is the one nobody can re-derive.
+        kept = migrated._conn.execute(
+            "SELECT label, line FROM decisions WHERE line = 'typed by a human'"
+        ).fetchone()
+        if kept is None or kept["label"] != 1:
+            failures.append("migration destroyed a human's existing label")
+        print("  ok   a label typed before the migration survived it")
+
+        # And the migrated database must be USABLE, not merely openable.
+        rid = migrated.record_decision(decision="queue", cls="digest",
+                                       line="after upgrade", ts=5.0)
+        again = migrated.record_decision(decision="queue", cls="digest",
+                                         line="after upgrade", ts=5.0)
+        total = migrated._conn.execute(
+            "SELECT COUNT(*) c FROM decisions").fetchone()["c"]
+        if rid != again or total != 2:
+            failures.append(
+                f"migrated db misbehaves: ids {rid}/{again}, {total} rows")
+        print(f"  ok   writes work on the migrated file, replay folds in "
+              f"({total} rows)")
+        migrated.close()
+
+        # Re-opening must be a no-op. A migration that is not idempotent is a
+        # migration that fails on the second launch.
+        reopened = FeedbackStore(old)
+        cols2 = len(reopened._conn.execute(
+            "PRAGMA table_info(decisions)").fetchall())
+        reopened.close()
+        if cols2 != len(after):
+            failures.append(f"re-open changed the schema: {len(after)} -> {cols2}")
+        print(f"  ok   re-opening is idempotent ({cols2} columns, unchanged)")
+
+    # The list of columns to migrate is maintained by hand, which is exactly
+    # how the bug happened. So check it against the schema that actually ships,
+    # and fail loudly when a column is declared in one place and not the other.
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = FeedbackStore(Path(tmp) / "probe.db")
+        declared = {r[1] for r in probe._conn.execute(
+            "PRAGMA table_info(decisions)")}
+        probe.close()
+    unlisted = declared - {c for _, c, _ in FeedbackStore._ADDED_COLUMNS}
+    # Columns present in the ORIGINAL table are not migrations; anything else
+    # is a column that was added later and must be listed.
+    original = {"id", "created_at", "decision", "cls", "source", "line",
+                "label", "already_know", "reviewed_at"}
+    forgotten = unlisted - original
+    if forgotten:
+        failures.append(
+            f"decisions columns added but not in _ADDED_COLUMNS: "
+            f"{sorted(forgotten)} -- they will be missing on every store that "
+            f"existed before they were added")
+    print(f"  ok   every post-hoc column is listed for migration "
+          f"({len(FeedbackStore._ADDED_COLUMNS)} listed)")
+
     print()
+    if failures:
+        for f in failures:
+            print(f"FAIL  {f}")
+        return 1
+    print("OK    400/400 writes durable, ids unique, close is safe, and every "
+          "writer commits")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

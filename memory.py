@@ -523,12 +523,88 @@ class FeedbackStore:
                 already_know INTEGER CHECK (already_know IN (0,1)),
                 reviewed_at  REAL
             );
-                        CREATE INDEX IF NOT EXISTS idx_decisions_unlabelled
-                ON decisions(label, decision, created_at);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_dedup
-                ON decisions(dedup_key) WHERE dedup_key != '';
             """
             )
+            self._conn.commit()
+            self._migrate()
+            # Indexes come LAST, after the columns they name exist. Creating
+            # them inside the same script as the tables fails outright on an
+            # old database: SQLite resolves column names when the statement
+            # runs, so `CREATE INDEX ... ON decisions(dedup_key)` raises
+            # "no such column" and the migration never gets the chance to add
+            # the very column the index is about. Schema order is load-bearing
+            # here, which is worth stating rather than rediscovering later.
+            with self._lock:
+                self._conn.executescript(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_decisions_unlabelled
+                        ON decisions(label, decision, created_at);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_dedup
+                        ON decisions(dedup_key) WHERE dedup_key != '';
+                    """
+                )
+                self._conn.commit()
+
+    # -- schema migration ----------------------------------------------------
+    #
+    # `CREATE TABLE IF NOT EXISTS` only ever CREATES a table. On a database
+    # that already has one it is a no-op, so every column this project has
+    # added since a store was first created -- `already_know`, `reviewed_at`,
+    # `observable`, `dry_run`, `dedup_key`, and whole tables like
+    # `push_events` and `suspensions` -- was silently absent for exactly the
+    # users who already had a store. The symptom is a bare
+    # `sqlite3.OperationalError: no such column: dedup_key` on first write
+    # after an upgrade, which is how this was found: a playtest database
+    # created before the ledger existed could not be opened afterwards.
+    #
+    # It is invisible in testing because the suites always build a FRESH
+    # database, where the CREATE statements do apply. The failing case is
+    # precisely the one no test was constructing: an old file.
+    #
+    # Adding a column is cheap and safe here: every one of these has a
+    # default, none is `NOT NULL` without one, and no existing row's meaning
+    # changes. So the migration is additive and idempotent, and re-running it
+    # on an up-to-date database is a no-op.
+    _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+        # (table, column, "TYPE ..." definition including the DEFAULT)
+        #
+        # `decisions` is the only table this project has extended. Its first
+        # version shipped without gate/reason/observable/dry_run/dedup_key, so
+        # every one of those is a column that an existing store will not have.
+        # The list is checked against the CREATE TABLE above when the suites
+        # run, so a column added in future cannot be forgotten here.
+        ("decisions", "gate", "TEXT NOT NULL DEFAULT ''"),
+        ("decisions", "reason", "TEXT NOT NULL DEFAULT ''"),
+        ("decisions", "observable", "INTEGER NOT NULL DEFAULT 1"),
+        ("decisions", "dry_run", "INTEGER NOT NULL DEFAULT 0"),
+        ("decisions", "dedup_key", "TEXT NOT NULL DEFAULT ''"),
+    )
+
+    def _migrate(self) -> None:
+        """
+        Bring an existing database up to the current schema.
+
+        Additive only, and deliberately so: a migration that drops or rewrites
+        a column is a migration that can lose somebody's ground truth, and the
+        only ground truth in this system is what a human typed. Where a
+        correct migration would need to transform data, the honest move is to
+        stop and say so rather than guess.
+        """
+        with self._lock:
+            for table, column, definition in self._ADDED_COLUMNS:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                except sqlite3.OperationalError as exc:
+                    # "duplicate column name" means it is already there, which
+                    # is the normal case on every run after the first. Any
+                    # other error is a real problem -- most likely the table
+                    # itself does not exist yet -- and must not be swallowed,
+                    # because that is the bug this function exists to fix.
+                    if "duplicate column" not in str(exc).lower():
+                        if "no such table" in str(exc).lower():
+                            continue          # table not created yet; fine
+                        raise
             self._conn.commit()
 
     def close(self) -> None:
