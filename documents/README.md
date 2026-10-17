@@ -28,6 +28,7 @@ changed* is more useful than a clean final story.
 | 15 | [Adversarial finding triage](15-adversarial-finding-triage.md) | What survived an attack, what did not, and what is still open. |
 | 16 | [Play-test: the first real run](16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
 | 17 | [JEV and JEPA: what transfers](17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
+| 18 | [Personalisation, measured](18-personalisation-measured.md) | The A/B finally run: why the interest block does not earn its place. |
 
 The synthesised design is [`../DESIGN.md`](../DESIGN.md).
 

@@ -282,13 +282,18 @@ Four properties are measured, not asserted:
 .venv/bin/python main.py --weights   # what the prompt is built from, and why
 ```
 
-**What is not proven.** That this improves anything for a real wearer. The A/B
-promised in `.context/llm.md` is still unrun, and stage 2 structurally *cannot*
-log which fact it chose, so compliance with the interest rules is unobservable
-from the display output. The honest summary: the substrate now measures
-cleanly, the injection is gated so it cannot invent facts, and whether it earns
-its place is an open question with a flag (`personalise=False`) ready to settle
-it.
+**It does not earn its place — measured, not assumed.** The A/B in
+`experiments/personalisation_ab.py` fired on **0 of 8** ordinary questions:
+the salience gate requires the question to literally contain an interest
+word, which natural phrasing does not do. When it does fire (n=3) it
+**shifts the polarity of the answer** and destabilises it across identical
+calls — which is exactly what its own rule 9 forbids. It also costs 0.44s
+vs 0.25s, against a budget just tightened from 6.71s to 0.48s.
+
+The learning substrate underneath is sound and remains useful for
+*observing* the wearer. It is only telling the model about it that fails.
+Full account and a correction to my own first reading of it:
+[documents/18](documents/18-personalisation-measured.md).
 
 ---
 
@@ -371,6 +376,7 @@ corrections are kept visible rather than quietly edited:
 | 15 | [Adversarial finding triage](documents/15-adversarial-finding-triage.md) | What survived an attack, what did not, and what is still open. |
 | 16 | [Play-test: the first real run](documents/16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
 | 17 | [JEV and JEPA: what transfers](documents/17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
+| 18 | [Personalisation, measured](documents/18-personalisation-measured.md) | The A/B finally run: why the interest block does not earn its place. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.
