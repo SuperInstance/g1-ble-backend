@@ -241,7 +241,6 @@ def build_session(
         send=build_sender(controller, args),
         store=store,
         config=config,
-        personalise=not args.no_personalise,
     )
 
     def on_packet(side: str, data: bytes) -> None:
@@ -365,7 +364,7 @@ async def repl(
                 print(f"  session: {session.summary()}")
                 continue
             if command == "prefs":
-                learned = session.preferences()
+                learned = await session.learned()
                 print(learned if learned else
                       "  nothing learned yet — a few reactions are needed.")
                 continue
@@ -500,7 +499,7 @@ async def run(args: argparse.Namespace) -> int:
               f"events; a topic needs {MIN_CARDS_FOR_INTEREST} distinct cards "
               f"before it counts as an interest")
         if not counts.get("events"):
-            print("\n  no reactions yet -- the stage-2 prompt is unmodified")
+            print("\n  no reactions yet -- nothing to observe")
 
         ev = store.topic_evidence()
         shown = sorted(ev.items(), key=lambda kv: (-kv[1]["cards"],
@@ -511,10 +510,14 @@ async def run(args: argparse.Namespace) -> int:
             print(f"  {term:<18} w={info['weight']:5.2f}  "
                   f"cards={info['cards']}  events={info['events']}{gate}")
 
-        if ctx.has_evidence:
-            print(f"\n  stage-2 prompt receives: {', '.join(ctx.interests)}")
-        else:
-            print("\n  stage-2 prompt receives: nothing (no evidenced interest)")
+        # Observation only. These weights used to be injected into a prompt,
+        # which was measured and removed (documents/18); nothing downstream
+        # reads them to write text, and saying so here stops the next reader
+        # from assuming the prompt is one function call away.
+        print("\n  no model sees any of this — it is shown to you, not to the "
+              "LLM")
+        if ctx.interests:
+            print(f"  ranked interests: {', '.join(ctx.interests)}")
         if ctx.recent_summaries:
             print(f"  recent cards on the lenses: {len(ctx.recent_summaries)}")
         store.close()
@@ -808,17 +811,12 @@ def build_parser() -> argparse.ArgumentParser:
              "on to compare, or to fall back if one-stage quality regresses.",
     )
     parser.add_argument(
-        "--no-personalise", action="store_true",
-        help="run stage 2 WITHOUT the wearer-interest block. This is the A/B "
-             "arm: the prompt becomes byte-identical to the pre-personalisation "
-             "one, so an operator can settle whether personalisation earns its "
-             "place without editing any code.",
-    )
-    parser.add_argument(
         "--weights", action="store_true",
         help="show learned topic weights and the evidence behind them, and "
-             "exit. This is the same evidence the stage-2 prompt is built "
-             "from, so it shows exactly what personalisation is acting on.",
+             "exit. Observation only: these weights are no longer shown to "
+             "the model. Injection was removed after measurement "
+             "(documents/18), but the substrate that produced them still "
+             "measures cleanly and this is how you read it.",
     )
     parser.add_argument(
         "--policy", action="store_true",

@@ -263,9 +263,10 @@ tap ──► _record()  ──to_thread──► SQLite (events, cards)
                                   ▼
                      topic_evidence()  per-CARD, damped, evidence-gated
                                   │
-                     ┌────────────┴────────────┐
-                     ▼                         ▼
-        stage-2 prompt (gated)        main.py --weights
+                                  ▼
+                     main.py --weights / prefs        (observation only —
+                                                      nothing reads this to
+                                                      write a prompt)
 ```
 
 Four properties are measured, not asserted:
@@ -275,24 +276,42 @@ Four properties are measured, not asserted:
 | Writes never stall the BLE heartbeat | baseline 11.4ms, **off-loop 11.5ms, inline 20.0ms** — off-loop writes add 0.1ms, inline adds 8.6ms. Measured against a baseline arm, not the nominal interval: asyncio's own overhead puts the real floor at ~11ms. |
 | Concurrent writes are durable | 8 threads × 50 writes → **400/400 rows**, 400 distinct ids, 0 orphans. |
 | `close()` cannot free a connection in use | pre-fix **segfaults 3/3 runs**; fixed **survives 18/18**. Runs in a subprocess — a segfault cannot be caught in-process. |
-| A topic is an interest, not one tap | 4 taps on one card → weight 2.23 but **excluded** from the prompt; 2+ distinct cards required. |
+| A topic is an interest, not one tap | 4 taps on one card → weight 2.23 but **excluded** from `interests()`; 2+ distinct cards required. |
 | Silence stays silence | never-reacted terms sit at exactly neutral with `cards=0`, and adding them does not reorder the ranking. |
 
 ```bash
-.venv/bin/python main.py --weights   # what the prompt is built from, and why
+.venv/bin/python main.py --weights   # what the store has learned, and on what evidence
 ```
 
-**It does not earn its place — measured, not assumed.** The A/B in
-`experiments/personalisation_ab.py` fired on **0 of 8** ordinary questions:
-the salience gate requires the question to literally contain an interest
-word, which natural phrasing does not do. When it does fire (n=3) it
-**shifts the polarity of the answer** and destabilises it across identical
-calls — which is exactly what its own rule 9 forbids. It also costs 0.44s
-vs 0.25s, against a budget just tightened from 6.71s to 0.48s.
+**It does not earn its place — measured, not assumed, and now removed.** The A/B
+in `experiments/personalisation_ab.py` fired on **0 of 8** ordinary questions,
+twice on two independent runs: the salience gate requires the question to
+literally contain an interest word, and natural phrasing does not do that. So
+on normal traffic the block was never sent at all. Where it did fire (n=3) it
+**shifted the polarity of the answer** once — and on the re-run it produced a
+small apparent win instead, which is the honest way to say that at n=3 the
+conditional arm cannot be read either way. It cost 0.44s vs 0.25s, against a
+budget just tightened from 6.71s to 0.48s.
 
-The learning substrate underneath is sound and remains useful for
-*observing* the wearer. It is only telling the model about it that fails.
-Full account and a correction to my own first reading of it:
+The removal rests on the two rows that reproduced — inert in normal use,
+expensive when active — not on the polarity observation, which is single-run.
+
+So the block was **deleted, not switched off**. `--no-personalise` went with
+it, because a flag that disables nothing is worse than no flag. Four sites
+went: the stage-1 imperative, the gated stage-2 template, the one-call block,
+and the per-query history scan that fed them — that scan cost ~26ms of
+heartbeat at 8000 events and was paid on every question to build a string the
+model was told to ignore. `experiments/adaptive_loop.py` §2 and §3b now assert
+that no prompt on either architecture carries a block, against a planted-block
+positive control so the absence cannot pass vacuously.
+
+The learning substrate underneath is sound and remains useful for *observing*
+the wearer (`--weights`, `prefs`) — but be precise about "sound": after the
+removal its topic weights have exactly one consumer in the shipped package,
+and that consumer is a human. They do not rank the interruption queue (that
+gate reads `queue_worth_rate`) and they reach no prompt. Full account, a
+correction to my own first reading of it, and the third injection site that
+turned out never to have been wired:
 [documents/18](documents/18-personalisation-measured.md).
 
 ---
@@ -376,7 +395,7 @@ corrections are kept visible rather than quietly edited:
 | 15 | [Adversarial finding triage](documents/15-adversarial-finding-triage.md) | What survived an attack, what did not, and what is still open. |
 | 16 | [Play-test: the first real run](documents/16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
 | 17 | [JEV and JEPA: what transfers](documents/17-jev-jepa-transfer.md) | Two independent reviews of SuperInstance's JEV/JEPA work, and what it changes here. |
-| 18 | [Personalisation, measured](documents/18-personalisation-measured.md) | The A/B finally run: why the interest block does not earn its place. |
+| 18 | [Personalisation, measured](documents/18-personalisation-measured.md) | The A/B, the verdict, and the removal — including a third injection site that was never wired to anything. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.

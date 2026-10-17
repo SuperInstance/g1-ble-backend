@@ -13,11 +13,18 @@ only good if it learns. This module records two things in a local SQLite file:
 * every card that has been shown (the full answer plus its summary), and
 * what the wearer did with it (ask for more, dismiss, confirm, star).
 
-From that history it derives a per-topic weight and a small "preferences"
-block that gets injected into the stage-2 prompt. Over a session or a day, the
-compressor starts emphasising the things this particular wearer actually
-engages with, rather than the generic "most important fact" every model
-defaults to.
+From that history it derives a per-topic weight, per wearer's own history.
+That weight is reported to the human (`main.py --weights`, `prefs`) and read
+by nothing else.
+
+It used to be different. This module produced a "preferences" block that was
+injected into the stage-2 prompt, so the compressor would emphasise what this
+particular wearer engages with rather than the generic "most important fact"
+every model defaults to. That was measured and removed: the gate fired on 0/8
+ordinary questions, and where it did fire it shifted the polarity of the
+answer and destabilised it, which is the opposite of the intent
+(documents/18). The substrate stayed because it measures cleanly and it is how
+a human reads the wearer. Only the injection is gone.
 
 Design constraints
 ------------------

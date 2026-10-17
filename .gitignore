@@ -31,3 +31,12 @@ Thumbs.db
 # Local capture artifacts
 *.log
 capture/
+
+# Local SQLite ledgers. The schema is in documents/09-schema.sql and the
+# code that creates them is in memory.py, so the databases themselves are
+# runtime state, never source. experiments/playtest.py writes one next to
+# itself unless told otherwise.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

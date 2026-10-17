@@ -49,7 +49,7 @@ come from reading the code; re-check them with the commands below.
 | a clock/deadline feature improves precision | **falsified** (+0.000; veto variants worse) | REPORT-A2 |
 | the SHIPPED `check_glanceable` performs like 0.688 | **assumed**: it adds referent, hedge and lead≥6 rules (:609-626) never measured | pipeline.py:589 |
 | the fact must sit in the first ~48 chars to be glanceable | **assumed** | Turn B §1 |
-| injecting interests improves answers | **FALSIFIED** (2026-10-16). The A/B ran: the salience gate fires on **0/8** ordinary questions, and when it fires (n=3) it shifts answer polarity and destabilises it — which rule 9 forbids. Costs 0.44s vs 0.25s. | experiments/personalisation_ab.py, documents/18 |
+| injecting interests improves answers | **FALSIFIED** (2026-10-16). The A/B ran twice: the salience gate fires on **0/8** ordinary questions both times, and the block costs 0.44s vs 0.25s (re-run: 0.46s vs 0.33s). The conditional arm at n=3 is not readable — run 1 found a polarity flip, the re-run found a small apparent win. **Removed from the shipped path**, not disabled; substrate kept for observation. | experiments/personalisation_ab.py, documents/18 |
 | EVENT_WEIGHTS, HALF_LIFE_DAYS=7, GLANCEABILITY_MIN=0.5 | **assumed**, untuned | memory.py:54,75; pipeline.py |
 
 ### Open
@@ -100,16 +100,24 @@ its 11 cases were written by the code's author.
   the 48-char premise falls, and `repair_buried_fact` with it.
 - After N wearer labels, glance/interrupt precision stays at the zero-shot
   level. Then personal calibration is not the fix for REPORT-A2's split gate.
-- An A/B with `--no-personalise` shows the same expand/dismiss rates. Then the
-  memory.py injection is decoration. **Runnable today**: the flag is wired from
-  the CLI through `Session` into `run_query`/`condense_for_glasses`, and the
-  resulting stage-2 prompt is asserted byte-identical to the base prompt. What
-  is still missing is a run with real wearer labels.
-- **Stage 1 still consumes `preferences()`.** Stage 2 was moved to the gated
-  `WearerContext`; stage 1 still receives the unguarded imperative string. That
-  is the worse hijack of the two — it shapes what gets reasoned about rather
-  than only what gets compressed — and it is now the main remaining exposure.
+- ~~An A/B with `--no-personalise` shows the same expand/dismiss rates. Then the
+  memory.py injection is decoration.~~ **CLOSED — the mechanism is gone.** The A/B
+  ran first and came back worse than decoration: the block fired on 0/8 ordinary
+  questions and, when it fired, flipped answer polarity (documents/18). It was
+  removed rather than turned off, so `--no-personalise` was deleted instead of
+  becoming the default — a flag that disables nothing is worse than no flag.
+  `experiments/adaptive_loop.py` §2 and §3b now assert that no prompt on either
+  architecture carries the block, with a planted-block positive control so the
+  absence cannot pass vacuously.
+- ~~Stage 1 still consumes `preferences()`.~~ **CLOSED by removal.** The
+  unguarded stage-1 imperative was the worse of the two injection sites, since
+  it shapes what gets reasoned about rather than only what gets compressed. It
+  went with the block. Note the strength of this closure: it follows by
+  *consistency* with the stage-2 measurement, not from an experiment of its
+  own. A weaker claim than the stage-2 falsification, and recorded as such.
 - Interest matching wins ties rather than leading. Stage 2 cannot log which
   fact it chose, so compliance with rules 8-12 is **unobservable**. Anti-echo
   (`already_knew=1`) can only be measured upstream; if it must live upstream,
-  interests should live there too.
+  interests should live there too. **Moot for the block** — it no longer exists
+  to be observed. The underlying point stands for any future relevance
+  mechanism: compliance you cannot log is compliance you do not have.

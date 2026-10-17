@@ -136,9 +136,22 @@ class RefinementPlugin:
 
     Below a threshold this does nothing — there is no point asking a capable
     model to generalise from three events. Once enough reactions accumulate it
-    synthesises a profile from the cards and their reactions, caches it, and
-    that cached text is what gets injected into the stage-2 prompt from then
-    on.
+    synthesises a profile from the cards and their reactions and caches it.
+
+    **NOTHING INJECTS THAT PROFILE ANYWHERE.** This docstring used to say the
+    cached text "is what gets injected into the stage-2 prompt from then on",
+    and that sentence was false for the entire life of the code:
+    ``preferred_profile()``, the only consumer of the cache, has never had a
+    caller in any commit of this repository. So this is a second
+    personalisation mechanism that was written, described as live, and never
+    connected to anything — while the stage-2 prompt it claimed to shape was
+    being shaped by a different and now-removed block.
+
+    It is kept because it is a plugin extension point reachable through the
+    ``g1_ble_backend.plugins`` entry-point group, not because it works. If you
+    are here to add personalisation back, read documents/18 first: the
+    injection it was written for has been measured and removed, and the
+    recommendation there is to leave it out.
     """
 
     name: str = "meta-refiner"
@@ -259,8 +272,12 @@ def preferred_profile(store: FeedbackStore) -> str:
     Best available preference block: a cached refined profile if one exists,
     otherwise the cheap statistical summary.
 
-    The refined profile is only produced by :class:`RefinementPlugin` once
-    enough reactions exist, so the two layers compose naturally.
+    Dead in practice: no caller anywhere in the repository or its history, so
+    the "the two layers compose naturally" claim in an earlier version of this
+    docstring described a composition that never existed. Both layers produce
+    exactly the kind of prompt fragment that documents/18 measured and
+    removed. Kept as an extension-point helper for third-party plugins, and
+    deliberately NOT wired to any prompt.
     """
     try:
         cached = store.get_meta("refined_profile")

@@ -4,13 +4,15 @@ Does the adaptive loop actually work, and does the heartbeat survive it?
 The integration is easy to claim and easy to get wrong in ways that only show
 up under load, so this exercises the four claims that matter:
 
-  1. INGESTION   ``run_query`` reads the store before either LLM runs, and the
-                 stage-2 prompt actually carries the interests when the answer
-                 concerns one of them.
-  2. GATING      the same prompt is withheld when the answer is unrelated, and
-                 ``personalise=False`` restores a byte-identical prompt. An
-                 interest block that reaches the model unconditionally is a
-                 topic filter, not personalisation.
+  1. OBSERVATION  the store keeps weights, and they move when the wearer
+                 reacts. This is the half of the adaptive loop that SURVIVED
+                 its own falsification: the substrate measures cleanly and is
+                 how a human reads the wearer (``main.py --weights``).
+  2. SILENCE     no interest ever reaches a prompt. This is the half that did
+                 not survive. Every prompt sent on either architecture is
+                 asserted to contain no <interests> block, including the case
+                 where the store has strong evidence and the query names it --
+                 because that is exactly the case the old gate let through.
   3. OFF-LOOP    a heartbeat task on the same loop as the session keeps its
                  cadence while reactions are written. The G1 drops the link
                  after ~32s without a 0x25 heartbeat, so a commit on the loop
@@ -18,6 +20,12 @@ up under load, so this exercises the four claims that matter:
   4. LEARNING    starring raises the weight of that card's keywords, the shift
                  is visible, and it is visible over time rather than only at
                  the end.
+
+Sections 2 and 3b were INVERTED at commit b5ea746+ when the injection was
+removed. They previously asserted that an on-topic question RECEIVED the
+block; asserting the absence of the block needs a positive control or it is
+vacuous -- so both sections first prove they can still detect a block that is
+genuinely there, then assert the shipped path does not contain one.
 
 Run: ``.venv/bin/python experiments/adaptive_loop.py``
 """
@@ -36,10 +44,20 @@ sys.path.insert(0, str(ROOT))
 from memory import MIN_CARDS_FOR_INTEREST, FeedbackStore   # noqa: E402
 from pipeline import (  # noqa: E402
     COMPRESSOR_SYSTEM_PROMPT,
+    ONE_STAGE_SYSTEM,
+    PRIMARY_SYSTEM_PROMPT,
     build_llm_config,
     condense_for_glasses,
     run_query,
 )
+
+# The removed block, kept as a DETECTOR rather than as a feature. Proving
+# "no <interests> in this prompt" is worthless if the search string never
+# matches anything, so both sections first build a prompt with the block
+# spliced in and confirm the assertion would have caught it. The exact text
+# is the specimen archived in experiments/personalisation_ab.py; only the
+# marker matters here.
+_BLOCK_MARKER = "<interests>"
 
 HEARTBEAT_INTERVAL = 0.010      # 10s in production; 10ms so a stall is visible
 FAILURES: list[str] = []
@@ -84,7 +102,7 @@ async def main() -> int:
         seed(store, 3, ["star"], ["stripe", "photon"])
         ctx = store.wearer_context()
 
-        print("\n1. ingestion")
+        print("\n1. observation substrate")
         check("store exposes evidenced interests",
               set(ctx.interests) == {"stripe", "photon"}, str(ctx.interests))
         check("gated on distinct cards, not taps",
@@ -92,27 +110,37 @@ async def main() -> int:
         check("recent card state is carried", len(ctx.recent_summaries) > 0,
               f"{len(ctx.recent_summaries)} summaries")
 
-        print("\n2. stage-2 prompt gating")
+        print("\n2. prompts carry no wearer context")
         cfg = config()
-        on_topic = ("Stripe gratings diffract light into discrete orders, "
-                    "which is why photon momentum appears quantised.")
-        off_topic = ("Mango cultivars ripen over six weeks once ethylene "
-                     "production crosses a threshold set by the seed.")
+
+        # POSITIVE CONTROL FIRST. Every assertion in this section is an
+        # absence, and an absence asserted by a search string that cannot
+        # match is indistinguishable from a passing test. So: splice the
+        # block into a copy of each prompt, confirm the marker is findable,
+        # and only then assert the shipped prompt has none. If someone deletes
+        # the block from pipeline.py and the marker in this file goes stale,
+        # this check fails LOUD instead of the absence passing vacuously.
+        for name, base in (("compressor", COMPRESSOR_SYSTEM_PROMPT),
+                           ("one-stage", ONE_STAGE_SYSTEM),
+                           ("primary", PRIMARY_SYSTEM_PROMPT)):
+            planted = base + f"\n\n<interests>stripe, photon</interests>\n"
+            check(f"CONTROL: a planted block IS detectable in the {name} prompt",
+                  _BLOCK_MARKER in planted)
 
         # Driven through the SHIPPED path -- Session.ask -> run_query ->
         # condense_for_glasses -- not by calling condense_for_glasses
         # directly. The previous version did the latter, and that is exactly
         # why a dead `elif` branch in the shipped code passed this section
         # green: the production call shape was never exercised.
-        # This section tests the STAGE-2 prompt, which only exists in two-stage
-        # mode -- so two_stage is pinned on here. The shipped default is now
-        # one call (experiments/fabrication.py), where this prompt is never
-        # sent. Pinning it explicitly rather than inheriting the default keeps
-        # the test meaningful in both architectures instead of silently
-        # asserting against a prompt nobody receives.
+        # The store is seeded with three starred cards on exactly these
+        # topics, so the evidence is as strong as this harness can make it.
         cfg.two_stage = True
 
-        async def ask_through_session(personalise: bool, stage1: str):
+        ON_TOPIC_STAGE1 = (
+            "Stripe gratings diffract light into discrete orders, which is "
+            "why photon momentum appears quantised.")
+
+        async def ask_through_session(stage1: str):
             """Drive the real Session.ask -> run_query -> condense path."""
             from session import Session
             fake = FakeClient([stage1, "Stripe splits light into orders."])
@@ -123,36 +151,37 @@ async def main() -> int:
 
             sess = Session(
                 send=send2, store=FeedbackStore(store.path), config=cfg,
-                client=fake, personalise=personalise,
+                client=fake,
             )
             await sess.ask("why does light diffract through a stripe grating")
             return fake
 
-        fake = await ask_through_session(
-            True,
-            "Stripe gratings diffract light into discrete orders, which is "
-            "why photon momentum appears quantised.")
-        sent = system_of(fake, 1)          # call 1 == stage 2
-        check("SHIPPED path: on-topic answer receives the block",
-              "<interests>" in sent)
-        check("prompt keeps the hard display rules",
-              "120 characters" in sent and "NO authority" in sent)
-        check("the old unguarded imperative is GONE",
-              "Weight those subjects when choosing" not in sent)
+        # One arm is enough now that there is nothing to compare: the block
+        # must be absent from every prompt, on-topic or not. Two-stage still
+        # gets its own check because that prompt no longer exists in any
+        # other form and could be reintroduced with the template.
+        fake = await ask_through_session(ON_TOPIC_STAGE1)
+        check("TWO-STAGE: on-topic answer still carries NO block",
+              _BLOCK_MARKER not in system_of(fake, 0),
+              "stage 1")
+        check("TWO-STAGE: compressor prompt carries NO block",
+              _BLOCK_MARKER not in system_of(fake, 1))
+        check("TWO-STAGE: compressor prompt is byte-identical to the base",
+              system_of(fake, 1) == COMPRESSOR_SYSTEM_PROMPT)
+        check("TWO-STAGE: the old unguarded imperative is still GONE",
+              "Weight those subjects when choosing" not in system_of(fake, 1))
 
-        fake2 = await ask_through_session(
-            True,
-            "Mango cultivars ripen over six weeks once ethylene production "
-            "crosses a threshold set by the seed. Mangoes are tropical fruit.")
-        check("SHIPPED path: off-topic answer is NOT personalised",
-              "<interests>" not in system_of(fake2, 1))
-
-        fake3 = await ask_through_session(
-            False,
-            "Stripe gratings diffract light into discrete orders, which is "
-            "why photon momentum appears quantised.")
-        check("SHIPPED path: personalise=False is byte-identical to base",
-              system_of(fake3, 1) == COMPRESSOR_SYSTEM_PROMPT)
+        # The plugin layer is a third injection site and it has never had a
+        # caller (plugins.preferred_profile). Guard it anyway: the failure mode
+        # here is quiet, because wiring a helper to a prompt looks like an
+        # improvement and produces no test failure on its own.
+        from plugins import preferred_profile
+        prof = preferred_profile(store)
+        check("CONTROL: the plugin profile path still produces text",
+              bool(prof), repr(prof[:40]))
+        check("TWO-STAGE: no plugin profile in either prompt",
+              prof[:40] not in system_of(fake, 0)
+              and prof[:40] not in system_of(fake, 1))
 
         print("\n3. heartbeat isolation under real writes")
         written: list[str] = []
@@ -264,20 +293,20 @@ async def main() -> int:
         await run_query("why does light diffract", send, client=FakeClient([
             "Stripe gratings diffract light into orders.",
             "Light splits into orders.",
-        ]), config=cfg, store=SlowStore(store, 0.0), verbose=False)
+        ]), config=cfg, verbose=False)
 
 
-        print("\n3b. one-stage interest injection (the DEFAULT path)")
-        # The shipped default is one call, which is what makes the stage-2
-        # prompt unreachable by default. If the interests are not wired into
-        # this path too, the whole adaptive loop is inert -- which is exactly
-        # what happened when the architecture flipped and went unnoticed.
-        from pipeline import build_one_stage_system
-
+        print("\n3b. the one-call path (the DEFAULT) carries no block either")
+        # This is the shipped default, so it is the path that actually matters
+        # for the absence assertion. The store is seeded on "stripe" and the
+        # query is squarely on that topic -- the strongest evidence the
+        # harness can produce -- and the block must still be absent. Under the
+        # old design this exact query DID receive the block, which is what
+        # experiments/personalisation_ab.py measured and falsified.
         cfg_two = config()
         cfg_two.two_stage = False
 
-        async def ask_one_stage(personalise: bool, q: str):
+        async def ask_one_stage(q: str):
             from session import Session
             fake = FakeClient(["Stripe gratings split light into orders."])
             out: list[str] = []
@@ -287,25 +316,22 @@ async def main() -> int:
 
             sess = Session(
                 send=send2, store=FeedbackStore(store.path), config=cfg_two,
-                client=fake, personalise=personalise,
+                client=fake,
             )
             await sess.ask(q)
             return fake
 
-        f1 = await ask_one_stage(True, "why does light diffract through a stripe grating?")
+        f1 = await ask_one_stage("why does light diffract through a stripe grating?")
         sent1 = system_of(f1, 0)
-        check("ONE-STAGE: on-topic query receives the block",
-              "<interests>" in sent1)
-        check("ONE-STAGE: block states it has no authority over truth",
-              "NO authority over what is true" in sent1)
+        check("ONE-STAGE: on-topic query gets NO block",
+              _BLOCK_MARKER not in sent1,
+              f"prompt was {len(sent1)} chars, no marker")
+        check("ONE-STAGE: prompt is byte-identical to the base",
+              sent1 == ONE_STAGE_SYSTEM)
 
-        f2 = await ask_one_stage(True, "how do mango cultivars ripen?")
+        f2 = await ask_one_stage("how do mango cultivars ripen?")
         check("ONE-STAGE: off-topic query gets NO block",
-              "<interests>" not in system_of(f2, 0))
-
-        f3 = await ask_one_stage(False, "why does light diffract through a stripe grating?")
-        check("ONE-STAGE: personalise=False is byte-identical to base",
-              system_of(f3, 0) == build_one_stage_system(None))
+              _BLOCK_MARKER not in system_of(f2, 0))
 
         print("\n4. learning is visible over time")
         before = store.topic_evidence()
@@ -314,7 +340,7 @@ async def main() -> int:
                                  summary=f"Mango {n} ripens", keywords=["mango"]).id
             store.add_event(cid, "star")
         after = store.topic_evidence()
-        check("new topic enters the prompt",
+        check("new topic appears in the observed interests",
               "mango" in store.wearer_context().interests,
               str(store.wearer_context().interests))
         check("weight rose with evidence",
@@ -339,7 +365,8 @@ async def main() -> int:
         for f in FAILURES:
             print(f"FAIL  {f}")
         return 1
-    print("OK    ingestion, gating, heartbeat isolation and learning all hold")
+    print("OK    substrate observes, no prompt carries the wearer, heartbeat "
+          "holds, learning is visible")
     return 0
 
 

@@ -110,7 +110,6 @@ class Session:
         client=None,
         touch_actions: Optional[dict[int, str]] = None,
         policy=None,
-        personalise: bool = True,
     ) -> None:
         # Contested design questions are resolved at setup and read here as a
         # flat answer. The runtime does not re-argue them; it reads a decision
@@ -118,7 +117,6 @@ class Session:
         self.policy = policy if policy is not None else resolve()
         self.send = send
         self.store = store
-        self.personalise = personalise
         self.config = config or LLMConfig(
             api_key=None, base_url=None,
             primary_model=None, compressor_model=None,
@@ -138,22 +136,19 @@ class Session:
         """Top of the stack, or None when nothing is showing."""
         return self.stack[-1] if self.stack else None
 
-    async def preferences(self) -> str:
+    async def learned(self) -> str:
         """
-        What the store has learned, as a prompt fragment.
+        What the store has worked out, for a human to read.
 
-        Empty for a new user, so the stage-1 prompt is unchanged until there
-        is real signal to act on.
+        Not a prompt fragment any more. This used to be
+        ``Session.preferences()`` and it was awaited on every ask and every
+        drill-down, scanning the whole event history off the event loop
+        (10.7ms median / 13.4ms max at 2400 events, growing linearly) to
+        build a string the model was then told to ignore. ``main.py prefs``
+        is now the only caller.
 
-        Async because this is a full scan of the event history: measured at
-        10.7ms median / 13.4ms max at 2400 events, growing linearly with
-        history, once per ask and once per drill-down. Called inline that is
-        10ms the BLE heartbeat does not get.
-
-        Note stage 2 no longer consumes this at all -- it uses the gated
-        WearerContext instead. Only stage 1 still does, which is a known open
-        item: injecting interests into stage 1 shapes what gets reasoned about
-        rather than merely what gets compressed.
+        Async because the scan is still a scan, and ``main.py prefs`` runs on
+        the same loop as the BLE heartbeat.
         """
         try:
             return await asyncio.to_thread(self.store.preferences)
@@ -193,11 +188,9 @@ class Session:
         client = self._ensure_ready()
         self.config = await ensure_models(self.config, client)
 
-        prefs = await self.preferences()
         result = await run_query(
             query, self.send, client=client, config=self.config,
-            preferences=prefs, mode="primary", store=self.store,
-            personalise=self.personalise,
+            mode="primary",
         )
 
         keywords = extract_keywords(f"{query} {result.display_text}")
@@ -290,9 +283,7 @@ class Session:
         context = self._shown_so_far()
         result = await run_query(
             top.card.query, self.send, client=client, config=self.config,
-            preferences=await self.preferences(), mode="followup",
-            context=context,
-            store=self.store, personalise=self.personalise,
+            mode="followup", context=context,
         )
 
         # Recording the reaction and creating the child card are one action.

@@ -25,6 +25,44 @@ Paired design: identical queries, identical temperature, both arms, order
 alternated to cancel any warm-up drift. Reported as counts, because at this n
 no difference is statistically meaningful and saying so is part of the result.
 
+RESULT (recorded 68fce3b, documents/18). The feature was falsified and the
+injection removed from the shipped path in the same commit series. The run:
+
+    gate fires            0/8 ordinary questions, 3/8 tie cases
+    outputs changed       3/3 gated cases
+    polarity shift        the "no" answer became a "yes" answer, 2/3 times
+    stability             run-to-run agreement 0/3; the plain arm 2/3
+    cost                  0.44s vs 0.25s median
+
+So the block was not decoration -- it acted, which is worse. It changed the
+answer's polarity and would not do it consistently, and it bought that for
+175ms. It was removed rather than retuned because the failure is the
+mechanism, not the wording.
+
+RE-RUN AFTER REMOVAL (same model, same corpus, 2026-10-16). It reproduces the
+two claims this rests on and refuses to reproduce the third:
+
+    base rate                0/8 ordinary questions  -- REPRODUCED exactly
+    latency penalty          0.46s vs 0.33s          -- REPRODUCED
+    conditional effect       "led with the interest fact 3 vs 2", i.e. the
+                             branch that reads as a small WIN, where run 1
+                             found a polarity flip
+
+Read that carefully rather than as noise. At n=3 the conditional arm cannot
+distinguish these two outcomes, and the two runs disagree on its sign. What
+survives is the part that does not depend on n: the gate does not fire on
+ordinary questions (twice), and the block costs latency every time it does
+(measured twice). There is no positive result here to preserve, and a feature
+that is inert in normal use and expensive in the rare case where it is active
+is not worth a flag. The instability is itself the finding.
+
+WHY THIS FILE STILL EXISTS. It carries its own copy of the removed prompt
+block. Nothing in the shipped package does any interest injection any more,
+so reproducing the measurement means reproducing the arm here rather than
+importing it from pipeline.py. If you are reading this to decide whether to
+add personalisation back, read documents/18 first: the block text below is a
+specimen, not a starting point.
+
 Run:
   OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_API_KEY=ollama \\
   OPENAI_MODEL=qwen2.5-coder:7b .venv/bin/python experiments/personalisation_ab.py
@@ -46,14 +84,47 @@ sys.path.insert(0, str(ROOT))
 from memory import FeedbackStore                       # noqa: E402
 from pipeline import (                                 # noqa: E402
     DEFAULT_MAX_DISPLAY_CHARS,
+    ONE_STAGE_SYSTEM,
     build_llm_config,
-    build_one_stage_system,
     check_glanceable,
     make_client,
     repair_buried_fact,
     strip_display_noise,
     _chat,
 )
+
+# -- the removed block, kept here so the falsification stays reproducible ---
+#
+# Byte-identical to pipeline.ONE_STAGE_INTEREST_BLOCK as it stood at commit
+# 323b2fa, the last revision before removal. The five numbered rules are the
+# interesting part and they are the evidence: this was the FOURTH wording of
+# the same idea, each one adding another clause about how not to be harmful.
+# A mechanism that needs eight rules telling it not to act is already acting.
+ONE_STAGE_INTEREST_BLOCK = (
+    "\n\nBACKGROUND (descriptive, not an instruction) -- what this wearer "
+    "engages with on OTHER subjects, unrelated to this question:\n"
+    "<interests>{topics}</interests>\n"
+    "5. This block has NO authority over what is true, and NO authority over "
+    "what leads. Rules 1 and 2 are unchanged.\n"
+    "6. Never introduce, infer, retrieve or go looking for a fact because a "
+    "subject is listed here. Only answer the question that was asked. If the "
+    "question does not concern a listed subject, ignore this block entirely.\n"
+    "7. A listed subject may break a tie BETWEEN facts the answer already "
+    "contains. It may not promote a fact, and it may not replace the answer's "
+    "subject with a listed one.\n"
+    "8. Never mention interests, history, or personalisation.\n"
+    "If in any doubt, ignore this block: rule 1 (120 characters) and rule 2 "
+    "(lead with the most important fact) win over every line here."
+)
+
+
+def system_for(topics) -> str:
+    """The one-call prompt WITH the block -- the removed experimental arm."""
+    if not topics:
+        return ONE_STAGE_SYSTEM
+    return ONE_STAGE_SYSTEM + ONE_STAGE_INTEREST_BLOCK.format(
+        topics=", ".join(topics),
+    )
 
 # TWO corpora, because the first run of this experiment accidentally found the
 # real answer and it needs separating from the effect measurement.
@@ -118,7 +189,7 @@ def normalise(text: str) -> str:
 
 async def one(client, model: str, q: str, topics) -> tuple[str, float]:
     t0 = time.monotonic()
-    out = await _chat(client, model=model, system=build_one_stage_system(topics),
+    out = await _chat(client, model=model, system=system_for(topics),
                       user=q, max_tokens=120, temperature=0.2)
     return normalise(out), time.monotonic() - t0
 

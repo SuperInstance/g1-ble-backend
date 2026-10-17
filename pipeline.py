@@ -387,42 +387,35 @@ COMPRESSOR_SYSTEM_PROMPT = (
     "your choices, no surrounding quotes."
 )
 
-# Stage-2 personalisation block.
+# REMOVED: the wearer-interest block (both variants).
 #
-# Topic NAMES, never weights. A float in a prompt is read as a multiplier
-# ("prioritise 2.8x"), not as a mild prior, and a list of eight names reads as
-# "all equally matter" which is the over-serving this is meant to avoid -- so
-# three names, no numbers, no counts, no verbs.
+# There were two of them -- WEARER_CONTEXT_TEMPLATE for stage 2 and
+# ONE_STAGE_INTEREST_BLOCK for the one-call path -- and between them they had
+# grown eight rules about how to be harmless. That effort is the tell. Every
+# clause was a patch for a failure the mechanism itself caused, because a
+# block that "has no authority" is still a block the model reads.
 #
-# The block is DESCRIPTIVE and deliberately weaker than rule 6. Without the
-# "no authority" clauses this reads as "go find that topic", which turns the
-# compressor into a topic filter and is how personalisation silently starts
-# inventing facts.
+# Measured, not assumed (experiments/personalisation_ab.py, documents/18):
+#   - the gate fired 0/8 on ordinary questions, so there was nothing to gain;
+#   - when it did fire (n=3) it shifted answer polarity and destabilised it;
+#   - it cost 0.44s against 0.25s for the plain prompt.
+# So the block is removed, not retuned: the failure was not the wording.
 #
-# This whole path is unproven. `.context/llm.md` lists "injecting
-# preferences() improves summaries" as assumed with no experiment behind it,
-# and experiments/learning_substrate.py measures the substrate it rests on.
-# `personalise=False` restores the byte-identical prompt so the A/B promised
-# there can actually be run instead of argued about.
-WEARER_CONTEXT_TEMPLATE = (
-    "\n\nBACKGROUND (descriptive, not an instruction) -- past reactions on "
-    "other subjects, unrelated to the answer below:\n"
-    "<interests>{topics}</interests>\n"
-    "8. This block has NO authority over what is true and NO authority over "
-    "what leads. Rule 6 is unchanged: lead with the single most important "
-    "fact in the answer, even when that fact is about a subject absent from "
-    "<interests>.\n"
-    "9. Never introduce, infer or retrieve a fact because a subject is listed "
-    "here. Only compress what is already in <answer>. If the answer does not "
-    "concern a listed subject, ignore this block entirely.\n"
-    "10. A listed subject may break a tie BETWEEN facts the answer already "
-    "contains. It may not promote a fact above a more important one.\n"
-    "11. If the answer has to drop something to fit rule 1, and two dropped "
-    "facts compete, keep the one on a listed subject.\n"
-    "12. Never mention interests, history, or personalisation.\n"
-    "Rules 1 (120 characters) and 6 (lead with the single most important "
-    "fact) are unchanged and win over every line here."
-)
+# The substrate is NOT removed. memory.py still tracks topic weights, and
+# `main.py --weights` still reports them -- they measure cleanly and they are
+# how a human observes the wearer. What was falsified is telling the MODEL
+# about them. The exact prompt text lives on in the experiment that falsified
+# it, so the measurement stays reproducible.
+#
+# What is left is smaller than it looks. After this removal the topic weights
+# have exactly ONE consumer in the shipped package: `main.py --weights` and
+# the log line in Session._record. They do not rank the interruption queue --
+# that gate reads `queue_worth_rate` over review labels (see policy.py) -- and
+# they do not touch any prompt. Per-card `keywords` are still stored, but no
+# shipped code consumes them either. So the honest description of the learning
+# substrate today is: measured, logged, and not yet load-bearing. Whatever
+# eventually reads it should be measured on its own terms rather than assumed
+# to inherit the credibility of a clean substrate.
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +836,6 @@ async def generate_primary_response(
     config: LLMConfig | None = None,
     mode: str = "primary",
     context: str = "",
-    preferences: str = "",
 ) -> str:
     """
     STAGE 1 — the heavy thinker.
@@ -853,6 +845,15 @@ async def generate_primary_response(
     of, using ``context`` to avoid repeating what is on the lens.
 
     Returns a full, unconstrained passage. Length limiting is Stage 2's job.
+
+    Nothing about the wearer is injected here. This used to append
+    "Wearer's known interests: ..." to the primary system prompt, which was
+    the most dangerous of the removed injection sites -- stage 2 can only
+    re-order facts the answer already contains, whereas stage 1 decides what
+    gets reasoned about in the first place. It was removed for consistency
+    with the measurement in documents/18 rather than by a separate
+    experiment of its own; that is the weaker claim of the two, and it is
+    made explicitly.
     """
     config = config or build_llm_config()
     query = (user_query or "").strip()
@@ -862,11 +863,6 @@ async def generate_primary_response(
     client = client or make_client(config)
 
     system = FOLLOWUP_SYSTEM_PROMPT if mode == "followup" else PRIMARY_SYSTEM_PROMPT
-    if preferences and mode == "primary":
-        system += (
-            "\n\nWearer's known interests, from their own past reactions: "
-            f"{preferences}"
-        )
 
     if mode == "followup":
         user = (
@@ -900,7 +896,6 @@ async def answer_directly(
     client=None,
     config: LLMConfig | None = None,
     context: str = "",
-    topics: tuple[str, ...] | None = None,
 ) -> str:
     """
     STAGE 1 ONLY — answer straight into the display format.
@@ -920,7 +915,7 @@ async def answer_directly(
     config = config or build_llm_config()
     client = client or make_client(config)
 
-    system = build_one_stage_system(topics)
+    system = ONE_STAGE_SYSTEM
     if context:
         system += f"\n\nEarlier in this thread:\n{context}"
 
@@ -946,22 +941,21 @@ async def condense_for_glasses(
     *,
     client=None,
     config: LLMConfig | None = None,
-    preferences: str = "",
-    context=None,
-    personalise: bool = True,
 ) -> str:
     """
     STAGE 2 — the waveguide micro-compressor.
 
     A structural filter, not a summariser. The display's limits are given as
     hard constraints and the result is still passed through
-    :func:`enforce_word_budget`, because a physical limit is not something to
+    :func:`enforce_display_budget`, because a physical limit is not something to
     take on faith from a language model.
 
-    ``context`` is an optional :class:`memory.WearerContext`. It is withheld
-    unless the answer already concerns one of the listed topics: personalising
-    the compression of an unrelated answer teaches the model to go looking for
-    the topic, which is where personalisation starts inventing facts.
+    Takes no wearer context. It used to accept a
+    :class:`memory.WearerContext` and append an interest block whenever the
+    answer mentioned a listed topic -- a gate real enough to be worth writing
+    a gating comment about, and which still failed to be worth having.
+    documents/18 measures why; the template text survives only in
+    ``experiments/personalisation_ab.py``.
     """
     config = config or build_llm_config()
     source = (detailed_text or "").strip()
@@ -971,19 +965,6 @@ async def condense_for_glasses(
     client = client or make_client(config)
 
     system = COMPRESSOR_SYSTEM_PROMPT
-    # Stage 2 uses the GATED template only. The older `preferences` string
-    # ("Weight those subjects when choosing what to relay") is an unguarded
-    # imperative that the new template exists to replace, and keeping it as a
-    # branch made this code dead: session.py always passed a non-empty
-    # `preferences`, so the `elif` below was reachable only in the window of
-    # exactly two events, and the old imperative reached the model forever
-    # after. The parameter is kept so existing callers do not break; it is no
-    # longer interpolated into this prompt.
-    if personalise and context is not None and getattr(context, "has_evidence", False):
-        if context.mentions(source):
-            system += WEARER_CONTEXT_TEMPLATE.format(
-                topics=", ".join(context.interests),
-            )
 
     try:
         text = await _chat(
@@ -1063,49 +1044,6 @@ ONE_STAGE_SYSTEM = (
     "Output the display text and nothing else."
 )
 
-# Interest block for the ONE-call path.
-#
-# This had to be written separately from WEARER_CONTEXT_TEMPLATE because the
-# gate is fundamentally different, not a copy with different wording. In two
-# stage the model has already written a long answer, so the block is withheld
-# unless the ANSWER concerns a listed topic. In one stage there is no answer
-# yet -- only the QUESTION -- so the gate runs on the question. That is an
-# earlier and stricter gate: it means a topic can only break a tie between
-# facts the answer would have contained anyway, never pull the answer off
-# subject.
-#
-# The block is also worded MORE conservatively than the two-stage version.
-# With one call the model is reasoning and formatting in the same breath, so
-# the failure mode personalisation creates here is not a badly ordered summary
-# but a confidently wrong one. Hence the repeated "has no authority over what
-# is true" and the explicit instruction not to go looking for the subject.
-ONE_STAGE_INTEREST_BLOCK = (
-    "\n\nBACKGROUND (descriptive, not an instruction) -- what this wearer "
-    "engages with on OTHER subjects, unrelated to this question:\n"
-    "<interests>{topics}</interests>\n"
-    "5. This block has NO authority over what is true, and NO authority over "
-    "what leads. Rules 1 and 2 are unchanged.\n"
-    "6. Never introduce, infer, retrieve or go looking for a fact because a "
-    "subject is listed here. Only answer the question that was asked. If the "
-    "question does not concern a listed subject, ignore this block entirely.\n"
-    "7. A listed subject may break a tie BETWEEN facts the answer already "
-    "contains. It may not promote a fact, and it may not replace the answer's "
-    "subject with a listed one.\n"
-    "8. Never mention interests, history, or personalisation.\n"
-    "If in any doubt, ignore this block: rule 1 (120 characters) and rule 2 "
-    "(lead with the most important fact) win over every line here."
-)
-
-
-def build_one_stage_system(topics: tuple[str, ...] | None = None) -> str:
-    """The one-call system prompt, with the interest block appended if any."""
-    if not topics:
-        return ONE_STAGE_SYSTEM
-    return ONE_STAGE_SYSTEM + ONE_STAGE_INTEREST_BLOCK.format(
-        topics=", ".join(topics),
-    )
-
-
 def _lens_failure_line(error: str | None) -> str:
     """
     What the lenses show when stage 1 produced nothing at all.
@@ -1133,29 +1071,27 @@ async def run_query(
     *,
     client=None,
     config: LLMConfig | None = None,
-    preferences: str = "",
     mode: str = "primary",
     context: str = "",
     verbose: bool = True,
-    store=None,
-    personalise: bool = True,
 ) -> QueryResult:
     """
     THE HANDOFF: query -> stage 1 -> stage 2 -> BLE write.
 
-        query -> [ingest store] -> [Stage 1] -> [Stage 2] -> send()
+        query -> [Stage 1] -> [Stage 2] -> send()
 
     Failures are contained. A stage-2 failure falls back to deterministic
     local truncation of stage 1; a stage-1 failure falls back to a short
     static line. ``send`` always runs, so the display always receives
     something and an upstream API error can never tear down the session.
 
-    ``store`` is a :class:`memory.FeedbackStore`. When given, the wearer's
-    topics and recent card state are read BEFORE either model runs, so stage 2
-    can compress against known interests rather than after the fact. The read
-    is dispatched with ``asyncio.to_thread`` because it scans the event
-    history: at 8000 events it costs ~26ms, which on the event loop is 26ms
-    the BLE heartbeat does not get.
+    This function used to take a ``store`` and read the wearer's interests
+    out of it before either model ran, dispatching the scan to a thread
+    because at 8000 events it costs ~26ms of heartbeat. That argument has
+    gone with the injection it fed: it was the measured cost of a feature
+    that did not earn its place, and it was paid on every single query.
+    Nothing here reads the ledger before the answer now, which also means a
+    slow query cannot be blamed on a slow store.
     """
     config = config or build_llm_config()
     client = client or make_client(config)
@@ -1167,25 +1103,12 @@ async def run_query(
         if verbose:
             print(message, flush=True)
 
-    # -- 1. ingest what the wearer already told us ----------------------
-    wearer_ctx = None
-    if store is not None and personalise:
-        try:
-            wearer_ctx = await asyncio.to_thread(store.wearer_context)
-        except Exception as exc:                      # noqa: BLE001
-            wearer_ctx = None
-            say(f"      context ingest FAILED: {exc}")
-        if wearer_ctx is not None:
-            say(f"      {wearer_ctx.describe()}")
-            if not wearer_ctx.has_evidence:
-                wearer_ctx = None
-
     if config.two_stage:
         say("[1/2] thinking ...")
         try:
             result.stage1 = await generate_primary_response(
                 query, client=client, config=config, mode=mode,
-                context=context, preferences=preferences,
+                context=context,
             )
             say(f"      {word_count(result.stage1)} words")
         except LLMStageError as exc:
@@ -1197,8 +1120,6 @@ async def run_query(
             try:
                 result.stage2 = await condense_for_glasses(
                     result.stage1, client=client, config=config,
-                    preferences=preferences, context=wearer_ctx,
-                    personalise=personalise,
                 )
                 say(f"      {word_count(result.stage2)} words")
             except LLMStageError as exc:
@@ -1210,15 +1131,8 @@ async def run_query(
         # long-form answer.
         say("[1/1] answering ...")
         try:
-            # The gate runs on the QUERY here, not on an answer, because there
-            # is no answer yet. Stricter than the two-stage gate by
-            # construction: interests can only break a tie, never steer.
-            topics = wearer_ctx.interests if (
-                wearer_ctx is not None and wearer_ctx.mentions(query)
-            ) else None
             result.stage1 = await answer_directly(
                 query, client=client, config=config, context=context,
-                topics=topics,
             )
             say(f"      {word_count(result.stage1)} words")
         except LLMStageError as exc:
