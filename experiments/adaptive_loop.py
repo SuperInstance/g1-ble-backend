@@ -99,23 +99,52 @@ async def main() -> int:
         off_topic = ("Mango cultivars ripen over six weeks once ethylene "
                      "production crosses a threshold set by the seed.")
 
-        fake = FakeClient(["Stripe gratings split light into discrete orders."])
-        await condense_for_glasses(on_topic, client=fake, config=cfg, context=ctx)
-        sent = system_of(fake)
-        check("on-topic answer receives the block", "<interests>" in sent)
-        check("prompt stays within display rules",
+        # Driven through the SHIPPED path -- Session.ask -> run_query ->
+        # condense_for_glasses -- not by calling condense_for_glasses
+        # directly. The previous version did the latter, and that is exactly
+        # why a dead `elif` branch in the shipped code passed this section
+        # green: the production call shape was never exercised.
+        async def ask_through_session(personalise: bool, stage1: str):
+            """Drive the real Session.ask -> run_query -> condense path."""
+            from session import Session
+            fake = FakeClient([stage1, "Stripe splits light into orders."])
+            written2: list[str] = []
+
+            async def send2(text: str) -> None:
+                written2.append(text)
+
+            sess = Session(
+                send=send2, store=FeedbackStore(store.path), config=cfg,
+                client=fake, personalise=personalise,
+            )
+            await sess.ask("why does light diffract through a stripe grating")
+            return fake
+
+        fake = await ask_through_session(
+            True,
+            "Stripe gratings diffract light into discrete orders, which is "
+            "why photon momentum appears quantised.")
+        sent = system_of(fake, 1)          # call 1 == stage 2
+        check("SHIPPED path: on-topic answer receives the block",
+              "<interests>" in sent)
+        check("prompt keeps the hard display rules",
               "120 characters" in sent and "NO authority" in sent)
+        check("the old unguarded imperative is GONE",
+              "Weight those subjects when choosing" not in sent)
 
-        fake2 = FakeClient(["Mango ripens in six weeks after ethylene rises."])
-        await condense_for_glasses(off_topic, client=fake2, config=cfg, context=ctx)
-        check("off-topic answer is NOT personalised",
-              "<interests>" not in system_of(fake2))
+        fake2 = await ask_through_session(
+            True,
+            "Mango cultivars ripen over six weeks once ethylene production "
+            "crosses a threshold set by the seed. Mangoes are tropical fruit.")
+        check("SHIPPED path: off-topic answer is NOT personalised",
+              "<interests>" not in system_of(fake2, 1))
 
-        fake3 = FakeClient(["Stripe gratings split light into discrete orders."])
-        await condense_for_glasses(on_topic, client=fake3, config=cfg,
-                                   context=ctx, personalise=False)
-        check("personalise=False restores the exact base prompt",
-              system_of(fake3) == COMPRESSOR_SYSTEM_PROMPT)
+        fake3 = await ask_through_session(
+            False,
+            "Stripe gratings diffract light into discrete orders, which is "
+            "why photon momentum appears quantised.")
+        check("SHIPPED path: personalise=False is byte-identical to base",
+              system_of(fake3, 1) == COMPRESSOR_SYSTEM_PROMPT)
 
         print("\n3. heartbeat isolation under real writes")
         written: list[str] = []
@@ -185,22 +214,44 @@ async def main() -> int:
                 await asyncio.sleep(0)        # same yields, same store
                 slow.add_event(card_id, kind, "control")
 
+        async def no_writes():
+            """Baseline: heartbeat cadence with the store untouched."""
+            await asyncio.sleep(0)
+
+        baseline_gaps = await measure(no_writes)
         control_gaps = await measure(on_loop_writes)
         real_gaps = await measure(off_loop_writes)
 
-        worst_control, worst_real = max(control_gaps), max(real_gaps)
+        worst_base, worst_control, worst_real = (
+            max(baseline_gaps), max(control_gaps), max(real_gaps))
         ceiling = HEARTBEAT_INTERVAL * 1.9
 
         # The control is the load-bearing assertion. Without it, "no stalls"
         # could just mean the instrument is insensitive, and a heartbeat this
         # smooth says nothing about where the writes ran.
-        check("CONTROL: inline writes DO stall the loop", worst_control > ceiling,
-              f"worst={worst_control * 1000:.1f}ms vs nominal "
-              f"{HEARTBEAT_INTERVAL * 1000:.0f}ms")
-        check("off-loop writes do not stall the loop", worst_real <= ceiling,
-              f"worst={worst_real * 1000:.1f}ms")
-        check("off-loop beats the control", worst_real < worst_control,
-              f"{worst_real * 1000:.1f}ms vs {worst_control * 1000:.1f}ms")
+        # Both arms are measured against a BASELINE captured on the same
+        # loop, in the same process, moments apart -- not against the nominal
+        # interval. asyncio's own timer and scheduling overhead puts the real
+        # floor at ~11ms, so "nominal + half a commit" sat within 0.1ms of the
+        # off-loop arm's own jitter. The question is not "is the heartbeat
+        # perfect" but "did these writes add a stall", and only a baseline can
+        # answer that.
+        stall_off = worst_real - worst_base
+        stall_inline = worst_control - worst_base
+        print(f"     baseline={worst_base * 1000:.1f}ms  "
+              f"off-loop={worst_real * 1000:.1f}ms  "
+              f"inline={worst_control * 1000:.1f}ms")
+
+        check("CONTROL: inline writes add a real stall",
+              stall_inline > COMMIT_COST * 0.75,
+              f"inline adds {stall_inline * 1000:.1f}ms over baseline "
+              f"(commit costs {COMMIT_COST * 1000:.0f}ms)")
+        check("off-loop writes add no measurable stall",
+              stall_off < COMMIT_COST * 0.5,
+              f"off-loop adds {stall_off * 1000:.1f}ms over baseline")
+        check("off-loop is materially better than inline",
+              stall_inline - stall_off > COMMIT_COST,
+              f"recovers {(stall_inline - stall_off) * 1000:.1f}ms")
 
         await run_query("why does light diffract", send, client=FakeClient([
             "Stripe gratings diffract light into orders.",
@@ -222,11 +273,16 @@ async def main() -> int:
               after["mango"]["weight"] > before.get("mango", {}).get("weight", 0.0),
               f"{before.get('mango', {}).get('weight', 0):.2f} -> "
               f"{after['mango']['weight']:.2f}")
-        check("weights remain sorted by evidence",
-              all(v["cards"] >= MIN_CARDS_FOR_INTEREST
-                  for v in after.values() if v in
-                  [{"cards": d["cards"]} for d in
-                   store.wearer_context().interest_detail]))
+        ctx_now = store.wearer_context()
+        check("every interest clears the distinct-card gate",
+              ctx_now.interest_detail
+              and all(d["cards"] >= MIN_CARDS_FOR_INTEREST
+                      for d in ctx_now.interest_detail),
+              f"{len(ctx_now.interest_detail)} interests")
+        check("interests are ordered by weight, not card count",
+              [d["weight"] for d in ctx_now.interest_detail]
+              == sorted((d["weight"] for d in ctx_now.interest_detail),
+                        reverse=True))
         print(f"     describe() -> {store.wearer_context().describe()}")
         store.close()
 

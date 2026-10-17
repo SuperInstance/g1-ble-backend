@@ -272,8 +272,9 @@ Four properties are measured, not asserted:
 
 | claim | measured |
 |---|---|
-| Writes never stall the BLE heartbeat | **control 21.8ms vs off-loop 11.1ms** against a 10ms nominal heartbeat. The control arm is the load-bearing one: it proves the instrument can detect a stall at all. |
+| Writes never stall the BLE heartbeat | baseline 11.4ms, **off-loop 11.5ms, inline 20.0ms** — off-loop writes add 0.1ms, inline adds 8.6ms. Measured against a baseline arm, not the nominal interval: asyncio's own overhead puts the real floor at ~11ms. |
 | Concurrent writes are durable | 8 threads × 50 writes → **400/400 rows**, 400 distinct ids, 0 orphans. |
+| `close()` cannot free a connection in use | pre-fix **segfaults 3/3 runs**; fixed **survives 18/18**. Runs in a subprocess — a segfault cannot be caught in-process. |
 | A topic is an interest, not one tap | 4 taps on one card → weight 2.23 but **excluded** from the prompt; 2+ distinct cards required. |
 | Silence stays silence | never-reacted terms sit at exactly neutral with `cards=0`, and adding them does not reorder the ranking. |
 

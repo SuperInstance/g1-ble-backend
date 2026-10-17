@@ -27,6 +27,7 @@ Run: ``.venv/bin/python experiments/store_stress.py``
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import threading
@@ -132,12 +133,31 @@ def main() -> int:
             failures.append(f"close raised {type(exc).__name__}, not StoreClosed")
             print(f"  close     : FAIL ({type(exc).__name__}: {exc})")
 
+    # -- 4. close() must not free a connection another thread is inside ----
+    #
+    # Runs in a SUBPROCESS because the failure mode is a SIGSEGV: close() frees
+    # the sqlite3 C object while a peer thread is inside sqlite3_step, and
+    # there is nothing for `except sqlite3.Error` to catch. Verified that this
+    # check can fail -- the pre-fix code segfaults on the first trial, every
+    # time (exit 139), while the current code survives every trial.
+    code = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "_close_race_child.py")],
+        capture_output=True, text=True, timeout=120,
+    )
+    print(f"  close race: exit {code.returncode} "
+          f"({len(code.stdout.splitlines())} trials survived)")
+    if code.returncode != 0:
+        failures.append(
+            f"close() race crashed the process (exit {code.returncode}): "
+            f"{code.stderr.strip().splitlines()[-1] if code.stderr.strip() else ''}"
+        )
+
     print()
     if failures:
         for f in failures:
             print(f"FAIL  {f}")
         return 1
-    print("OK    400/400 writes durable, ids unique and present, close is clean")
+    print("OK    400/400 writes durable, ids unique and present, close is safe")
     return 0
 
 

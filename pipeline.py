@@ -856,9 +856,15 @@ async def condense_for_glasses(
     client = client or make_client(config)
 
     system = COMPRESSOR_SYSTEM_PROMPT
-    if preferences:
-        system += f"\n\nKnown about this wearer:\n{preferences}"
-    elif personalise and context is not None and getattr(context, "has_evidence", False):
+    # Stage 2 uses the GATED template only. The older `preferences` string
+    # ("Weight those subjects when choosing what to relay") is an unguarded
+    # imperative that the new template exists to replace, and keeping it as a
+    # branch made this code dead: session.py always passed a non-empty
+    # `preferences`, so the `elif` below was reachable only in the window of
+    # exactly two events, and the old imperative reached the model forever
+    # after. The parameter is kept so existing callers do not break; it is no
+    # longer interpolated into this prompt.
+    if personalise and context is not None and getattr(context, "has_evidence", False):
         if context.mentions(source):
             system += WEARER_CONTEXT_TEMPLATE.format(
                 topics=", ".join(context.interests),

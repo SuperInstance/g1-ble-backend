@@ -110,6 +110,7 @@ class Session:
         client=None,
         touch_actions: Optional[dict[int, str]] = None,
         policy=None,
+        personalise: bool = True,
     ) -> None:
         # Contested design questions are resolved at setup and read here as a
         # flat answer. The runtime does not re-argue them; it reads a decision
@@ -117,6 +118,7 @@ class Session:
         self.policy = policy if policy is not None else resolve()
         self.send = send
         self.store = store
+        self.personalise = personalise
         self.config = config or LLMConfig(
             api_key=None, base_url=None,
             primary_model=None, compressor_model=None,
@@ -136,15 +138,25 @@ class Session:
         """Top of the stack, or None when nothing is showing."""
         return self.stack[-1] if self.stack else None
 
-    def preferences(self) -> str:
+    async def preferences(self) -> str:
         """
         What the store has learned, as a prompt fragment.
 
-        Empty for a new user, so the stage-2 prompt is unchanged until there
+        Empty for a new user, so the stage-1 prompt is unchanged until there
         is real signal to act on.
+
+        Async because this is a full scan of the event history: measured at
+        10.7ms median / 13.4ms max at 2400 events, growing linearly with
+        history, once per ask and once per drill-down. Called inline that is
+        10ms the BLE heartbeat does not get.
+
+        Note stage 2 no longer consumes this at all -- it uses the gated
+        WearerContext instead. Only stage 1 still does, which is a known open
+        item: injecting interests into stage 1 shapes what gets reasoned about
+        rather than merely what gets compressed.
         """
         try:
-            return self.store.preferences()
+            return await asyncio.to_thread(self.store.preferences)
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("could not read preferences: %s", exc)
             return ""
@@ -181,14 +193,16 @@ class Session:
         client = self._ensure_ready()
         self.config = await ensure_models(self.config, client)
 
-        prefs = self.preferences()
+        prefs = await self.preferences()
         result = await run_query(
             query, self.send, client=client, config=self.config,
             preferences=prefs, mode="primary", store=self.store,
+            personalise=self.personalise,
         )
 
         keywords = extract_keywords(f"{query} {result.display_text}")
-        card = self.store.add_card(
+        card = await asyncio.to_thread(
+            self.store.add_card,
             query=query,
             stage1=result.stage1 or "",
             summary=result.display_text,
@@ -265,15 +279,17 @@ class Session:
         context = self._shown_so_far()
         result = await run_query(
             top.card.query, self.send, client=client, config=self.config,
-            preferences=self.preferences(), mode="followup", context=context,
-            store=self.store,
+            preferences=await self.preferences(), mode="followup",
+            context=context,
+            store=self.store, personalise=self.personalise,
         )
 
         # Recording the reaction and creating the child card are one action.
         await self._record(top.card.id, "expand", "touchbar/tap")
 
         keywords = extract_keywords(f"{top.card.query} {result.display_text}")
-        card = self.store.add_card(
+        card = await asyncio.to_thread(
+            self.store.add_card,
             query=top.card.query,
             stage1=result.stage1 or "",
             summary=result.display_text,

@@ -238,6 +238,7 @@ def build_session(
         send=build_sender(controller, args),
         store=store,
         config=config,
+        personalise=not args.no_personalise,
     )
 
     def on_packet(side: str, data: bytes) -> None:
@@ -449,7 +450,7 @@ async def run(args: argparse.Namespace) -> int:
         print(f"saved overrides -> {path}")
 
     if args.weights:
-        from memory import MIN_CARDS_FOR_INTEREST, NEUTRAL, FeedbackStore
+        from memory import MIN_CARDS_FOR_INTEREST, FeedbackStore
 
         store = FeedbackStore(args.store)
         ctx = store.wearer_context()
@@ -662,6 +663,12 @@ async def run(args: argparse.Namespace) -> int:
         # Always release the adapter so the next run can reconnect at once.
         with contextlib.suppress(Exception):
             await asyncio.wait_for(controller.disconnect(), timeout=10.0)
+        # Close the store too. It was previously never closed at all, which
+        # leaked the per-thread connections; now that close() is safe against
+        # live readers (it used to segfault), it is also correct to call.
+        if session is not None:
+            with contextlib.suppress(Exception):
+                session.store.close()
 
     if exit_code == 0 and controller._packet_log and session is None:
         summarise_packets(controller)
@@ -750,6 +757,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", metavar="PATH",
         help="feedback database path "
              "(default: ~/.local/share/g1-ble-backend/feedback.db)",
+    )
+    parser.add_argument(
+        "--no-personalise", action="store_true",
+        help="run stage 2 WITHOUT the wearer-interest block. This is the A/B "
+             "arm: the prompt becomes byte-identical to the pre-personalisation "
+             "one, so an operator can settle whether personalisation earns its "
+             "place without editing any code.",
     )
     parser.add_argument(
         "--weights", action="store_true",

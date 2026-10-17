@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from memory import (  # noqa: E402
     MAX_WEIGHT,
+    MIN_WEIGHT,
     MIN_CARDS_FOR_INTEREST,
     NEUTRAL,
     FeedbackStore,
@@ -113,6 +114,44 @@ def main() -> int:
                 failures.append(f"silent term {t} reads as evidence: {info}")
         if [c["topic"] for c in store.interests(limit=5)] != ranked:
             failures.append("adding silent terms changed the interest ranking")
+
+        # -- 5. negative evidence must be able to cancel --------------------
+        #
+        # Both of these were real ranking inversions, found by an independent
+        # review. The first came from folding each card down to its single
+        # strongest reaction, which silently deleted every dismiss on a card
+        # that also drew one star.
+        noisy = store.add_card(query="noisy", stage1="n" * 400,
+                               summary="Noisy topic", keywords=["noisy"]).id
+        store.add_event(noisy, "star")
+        for _ in range(20):
+            store.add_event(noisy, "dismiss")
+        for n in range(2):
+            c = card(store, f"noisy rest {n}", ["noisy"])
+            store.add_event(c, "star")
+
+        faint = store.add_card(query="faint", stage1="f" * 400,
+                               summary="Faint topic", keywords=["faint"]).id
+        store.add_event(faint, "confirm")
+        store.add_event(faint, "dismiss")
+
+        w3 = store.topic_evidence()
+        print(f"[5] star+dismiss x20      -> w={w3['noisy']['weight']:.3f} "
+              f"cards={w3['noisy']['cards']}")
+        print(f"[5] confirm+dismiss      -> w={w3['faint']['weight']:.3f} "
+              f"cards={w3['faint']['cards']}")
+
+        for t in ("noisy", "faint"):
+            if w3[t]["weight"] < MIN_WEIGHT or w3[t]["weight"] > MAX_WEIGHT:
+                failures.append(f"{t} weight {w3[t]['weight']} is out of bounds")
+            if t in [c["topic"] for c in store.interests(limit=10)]:
+                failures.append(f"net-negative topic {t} is still an interest")
+
+        # ordering is by weight, with card count only a tie-break
+        order = [c["weight"] for c in store.interests(limit=10)]
+        if order != sorted(order, reverse=True):
+            failures.append(f"interests not ordered by weight: {order}")
+        print(f"[5] interest order        -> {[c['topic'] for c in store.interests(limit=4)]}")
 
         # -- preferences() is empty until there is real evidence ------------
         fresh = FeedbackStore(Path(tmp) / "fresh.db")
