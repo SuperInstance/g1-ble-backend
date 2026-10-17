@@ -85,6 +85,21 @@ main.py --review                         # a human labels what was decided
 main.py --evidence                       # which policy metrics are real
 ```
 
+The ledger is **one event, one row.** `record_decision` keys on
+`(source, class, line, event timestamp)`, so replaying a spool does not append
+copies — which matters because `n_labels` is the volume gate behind `g1_model`,
+and a duplicated dry run would walk the count toward the switch-on threshold
+with no new ground truth in it. A decision that *changes* when the policy
+changes updates in place, and a human label is never overwritten by a later
+automatic pass.
+
+Databases that already exist are **migrated, not abandoned.** `CREATE TABLE IF
+NOT EXISTS` only creates, so every column added after a store was first created
+would otherwise be missing for exactly the users who already had one.
+`FeedbackStore._migrate()` adds them on open, additively and idempotently — a
+migration that could drop a column could lose somebody's ground truth, and the
+only ground truth here is what a human typed.
+
 The gates, in order, each refusing rather than degrading:
 
 1. **kill-switch** — a file, re-read every cycle, so a process that has stopped
@@ -281,6 +296,7 @@ python main.py --policy-axes                    # every axis, options, deciding 
 python main.py --policy                         # what is resolved, what is still open
 python main.py --evidence                       # which metrics are real, which have no source
 python main.py --set-policy g1_model=on         # pin one by hand; persists
+python main.py --clear-policy g1_model          # unpin it — back to resolving from evidence
 ```
 
 | axis | options | default | settled by | source today |
@@ -296,7 +312,8 @@ conservative default. An axis cannot be switched on by opinion — and a
 `--set-policy` pin cannot either: overrides are recorded as `manual=True,
 enough_evidence=False`, so `settled_by_evidence()` refuses them and `--evidence`
 names them. `--override-ttl-hours` makes a test pin expire on its own when the
-policy loads.
+policy loads, and `--clear-policy` removes one by hand when the TTL was not
+set. A pin with neither is permanent, which is why both exist.
 
 **`interrupt_gate` is not a milestone, and the arithmetic says so.** Its ≥299
 clean pushes is a *guard against silently relaxing the rules*, not a roadmap:
