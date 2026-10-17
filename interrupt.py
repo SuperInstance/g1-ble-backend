@@ -633,6 +633,71 @@ def suspension_state(store, now: Optional[float] = None) -> dict:
     return alive
 
 
+@dataclass(frozen=True)
+class LinkStatus:
+    """
+    What the radio can actually do right now.
+
+    A struct rather than a check, on purpose. The decision needs to be
+    unit-testable without a radio, and there is no G1 on this host -- so the
+    testable artefact has to be the DATA, with the logic reading it, rather
+    than the logic buried in the driver where it can only be exercised by
+    connecting a physical device.
+
+    Both arms are required. The G1 is two BLE peripherals, and
+    ``EvenG1Controller.arms`` filters down to whichever are connected, so a
+    dead right arm silently reduces the fan-out to one lens rather than
+    failing. A card split across one eye is not "half an interruption", it is
+    a different and more alarming one: the wearer sees text appear on one
+    side of their face with nothing on the other and cannot tell whether the
+    glasses are broken or the system is broken.
+
+    ``heartbeat_age_s`` is not decorative. The link drops after roughly 32
+    seconds without a 0x25, and ``_heartbeat_loop`` swallows its exceptions
+    and only logs a warning -- so a heartbeat task that has died looks exactly
+    like a healthy link from every other observable. Age is the only signal
+    that distinguishes them.
+    """
+
+    left_ok: bool = False
+    right_ok: bool = False
+    mtu_left: int = 23
+    mtu_right: int = 23
+    heartbeat_age_s: Optional[float] = None
+    fault: Optional[str] = None
+
+    MIN_MTU = 24        # > 23 means the default ATT MTU was beaten
+    MAX_HEARTBEAT_AGE = 20.0
+
+    def check(self) -> tuple[bool, str]:
+        """
+        Can this link carry a push? Returns (ok, reason).
+
+        Every failure is a REFUSAL, never a degradation. The alternative --
+        push on one arm and hope -- is what makes an interruption confusing
+        rather than merely late.
+        """
+        if self.fault:
+            return False, f"driver reports a fault: {self.fault}"
+        if not self.left_ok:
+            return False, "left arm not connected"
+        if not self.right_ok:
+            return False, ("right arm not connected -- pushing on one lens "
+                           "would show a partial card, so it is refused")
+        if self.mtu_left <= 23 or self.mtu_right <= 23:
+            return False, (f"MTU not negotiated (L={self.mtu_left} "
+                           f"R={self.mtu_right}); notifications do not flow "
+                           f"at the default 23")
+        if self.heartbeat_age_s is None:
+            return False, "no heartbeat ever observed; cannot prove the link is up"
+        if self.heartbeat_age_s > self.MAX_HEARTBEAT_AGE:
+            return False, (f"last heartbeat {self.heartbeat_age_s:.1f}s ago "
+                           f"(limit {self.MAX_HEARTBEAT_AGE:.0f}s); the link "
+                           f"drops at ~32s")
+        return True, (f"both arms, MTU {self.mtu_left}/{self.mtu_right}, "
+                      f"heartbeat {self.heartbeat_age_s:.1f}s old")
+
+
 def summarize(verdicts: list[Verdict]) -> dict:
     """Counts per gate — the shape a soak report wants."""
     out: dict[str, int] = {"push": 0, "queue": 0}

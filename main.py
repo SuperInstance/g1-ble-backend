@@ -375,6 +375,12 @@ async def repl(
             if command == "stats":
                 summarise_packets(controller)
                 print(f"  session: {session.summary()}")
+                # The link's own view of itself. `controller.arms` reports
+                # whichever arms are UP, which is not the same question as
+                # "can this link carry a push" -- a single surviving arm
+                # looks healthy there and would render a card on one lens.
+                link_ok, link_why = controller.link_status().check()
+                print(f"  link:    {'OK' if link_ok else 'DEGRADED'} — {link_why}")
                 continue
             if command == "prefs":
                 learned = await session.learned()
@@ -678,8 +684,12 @@ async def run(args: argparse.Namespace) -> int:
             print("\n  nothing waiting.")
         else:
             now = datetime.now(timezone.utc)
-            print(f"\n  {'action':<6} {'gate':<12} {'G2':<4} {'src':<8} why")
+            print(f"  {'action':<6} {'gate':<12} {'G2':<4} {'src':<8} why")
             print(f"  {'-' * 78}")
+            from interrupt import LinkStatus as _LS
+            link_ok, link_why = _LS().check()
+            print(f"  radio   {'PASS' if link_ok else 'NO RADIO / NOT CHECKED'}"
+                  f"        {link_why}")
             would_qualify = 0
             for v in verdicts:
                 mark = "PUSH" if v.is_push else "queue"

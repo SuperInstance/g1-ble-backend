@@ -263,6 +263,7 @@ Everything here is reproducible and every number is computed from a real run.
 .venv/bin/python experiments/interrupt_gate.py   # push-vs-queue: silence, budget, ordering
 .venv/bin/python experiments/wiring_audit.py     # nothing advertised is left unwired (fails the build)
 .venv/bin/python experiments/suspend_gate.py   # stoppable; one mis-fire mutes one class for 24h
+.venv/bin/python experiments/link_gate.py      # refuses the one-lens, un-negotiated and silent links
 .venv/bin/python main.py --queue --queue-dir .   # dry-run the interrupt decision on a spool
 .venv/bin/python main.py --evidence              # which policy metrics are real, and which have no source
 .venv/bin/python main.py --kill-switch show      # is pushing armed?

@@ -213,7 +213,7 @@ building with no hardware:
 | 0 | decision + dry run | done |
 | 1 | budget counted from durable timestamps | **done this commit** |
 | 2 | kill-switch + auto-suspend state machine, shipped dormant | **done this commit** |
-| 3 | a `LinkStatus` seam — gate logic tested against a fake link | next |
+| 3 | a `LinkStatus` seam — gate logic tested against a fake link | **done this commit** |
 | 4 | **run the existing CLI on real hardware** | not code — a session |
 | 5 | live push, operator-armed, one class | not until 4 |
 | 6 | unattended | not until 5 |
@@ -304,6 +304,49 @@ smoothed over later:
    is correct at all.
 4. Whether the host survives a day. 32s heartbeat versus a closing laptop lid.
    A push loop that dies at 40 minutes looks exactly like a quiet day.
+
+## Rung 3, built: the link gate
+
+`interrupt.LinkStatus` is a struct and `check()` is a pure predicate, so the
+whole gate is exercisable with no G1 and no BlueZ. That is the entire reason
+for this shape: the testable artefact has to be the *data*, with the logic
+reading it, because logic buried in the driver can only be tested by
+connecting a physical device.
+
+### The failure it prevents
+
+`EvenG1Controller.arms` filters to whichever arms are connected, and
+`send_text_packet` takes `min(mtu)` across the survivors. So a dead right arm
+returns `[left]`, the caller proceeds, and the card renders on **one lens with
+no error raised anywhere**.
+
+That is not "half an interruption". It is a different and more alarming one:
+text appears on one side of the wearer's face with nothing on the other, and
+they cannot tell whether the glasses are broken or the system is broken. The
+gate refuses instead, and the refusal says why in those words.
+
+The second failure is quieter. `_heartbeat_loop` used to swallow every
+exception and log a warning, so a heartbeat task that had **died** looked
+exactly like a healthy link by any other observable. It now stamps
+`_last_heartbeat` on every confirmed send, and the gate refuses on staleness —
+the only observable that separates "fine" from "looks fine because nobody has
+asked it anything in a minute".
+
+```
+both arms, MTU > 23 each, last heartbeat < 20s   -> may push
+right arm dead                                     -> REFUSED ("one lens")
+MTU 23 anywhere                                    -> REFUSED (no notifications flow)
+heartbeat 45s old                                  -> REFUSED (link drops at ~32s)
+heartbeat never seen                               -> REFUSED ("cannot prove")
+```
+
+`controller.link_status()` populates it, and the REPL `:stats` prints it, so
+it is read rather than being a struct that exists for its own sake.
+
+**What this does not prove:** that a real G1 reports any of this truthfully.
+`g1_driver` has never touched a device. The logic is verified against a
+hand-built fake; the device is not. Those are different claims and
+`experiments/link_gate.py` says so in its own header.
 
 ## What was deliberately not built
 

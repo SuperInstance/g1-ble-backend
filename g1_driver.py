@@ -702,6 +702,12 @@ class EvenG1Controller:
         self.channel: Optional[str] = None
 
         self._heartbeat_task: Optional[asyncio.Task] = None
+        # Set on every CONFIRMED heartbeat, so link_status() can report its
+        # age and the push gate can refuse a link that has gone quiet. The G1
+        # drops at ~32s without a 0x25, so this is a liveness signal, not
+        # telemetry.
+        self._last_heartbeat: Optional[float] = None
+        self._fault: str = ""
         self._packet_log: list[tuple[str, bytes]] = []
         self._listeners: list[Callable[[str, bytes], None]] = []
 
@@ -919,6 +925,34 @@ class EvenG1Controller:
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
+    def link_status(self, now: Optional[float] = None) -> "LinkStatus":
+        """
+        The link's truth, as a value.
+
+        Added because ``arms`` is actively misleading for deciding whether a
+        push may go out: it filters to whatever is connected, so a dead right
+        arm returns [left] and the caller proceeds -- and the card renders on
+        one lens with no error. Reading "is at least one arm up" as "the link
+        is healthy" is the bug; this reports each side and the MTU separately
+        so a caller can refuse instead.
+
+        Imported lazily because interrupt imports policy, and importing
+        g1_driver at module scope would pull bleak into the decision layer,
+        which is supposed to be testable with no radio at all.
+        """
+        from interrupt import LinkStatus
+
+        now = time.monotonic() if now is None else now
+        hb_age = (now - self._last_heartbeat) if self._last_heartbeat else None
+        return LinkStatus(
+            left_ok=bool(self.left and self.left.is_connected),
+            right_ok=bool(self.right and self.right.is_connected),
+            mtu_left=int(self.left.mtu) if self.left else 23,
+            mtu_right=int(self.right.mtu) if self.right else 23,
+            heartbeat_age_s=hb_age,
+            fault=self._fault or None,
+        )
+
     async def _stop_heartbeat(self) -> None:
         task, self._heartbeat_task = self._heartbeat_task, None
         if task is None:
@@ -928,15 +962,37 @@ class EvenG1Controller:
             await task
 
     async def _heartbeat_loop(self) -> None:
-        """Keep the link alive; the G1 drops the connection after ~32s idle."""
+        """
+        Keep the link alive; the G1 drops the connection after ~32s idle.
+
+        The `_last_heartbeat` stamp is the point of this rewrite. The old loop
+        swallowed every exception and only logged a warning, so a heartbeat
+        task that had died -- or an arm that had stopped accepting writes --
+        was indistinguishable from a perfectly healthy link by any other
+        means. `link_status()` now reports the age of the last CONFIRMED
+        heartbeat, and the push gate refuses on staleness. That is the only
+        observable that separates "the link is fine" from "the link looks fine
+        because nobody has asked it anything in a minute".
+        """
         try:
             while True:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
+                sent = 0
                 for arm in self.arms:
-                    await arm.send_heartbeat()
+                    try:
+                        await arm.send_heartbeat()
+                        sent += 1
+                    except Exception as exc:
+                        log.warning("heartbeat to %s failed: %s",
+                                    arm.identity.side, exc)
+                if sent:
+                    self._last_heartbeat = time.monotonic()
+                elif self.arms:
+                    self._fault = "no arm accepted a heartbeat"
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover - defensive
+            self._fault = f"heartbeat loop stopped: {exc}"
             log.warning("heartbeat loop stopped: %s", exc)
 
     # -- packet reception --------------------------------------------------
