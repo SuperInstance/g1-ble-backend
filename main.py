@@ -574,9 +574,34 @@ async def run(args: argparse.Namespace) -> int:
               f"(oldest first — a newest-first queue drifts to whatever "
               f"happened today and hides a consistently bad source)\n")
         labelled = 0
+        skipped_censored = 0
         for row in pending:
-            mark = "" if row["observable"] else "   [NOT OBSERVABLE — the "
-            mark += "glasses were off your face]"
+            # CENSORING, NOT A NEGATIVE. Research (documents/22) turned up that
+            # the delayed-feedback literature's good result -- Pike-Burke et
+            # al. 2018, "Bandits with Delayed, Aggregated Anonymous Feedback"
+            # -- covers rewards that arrive late. A link drop is different:
+            # for that window the label NEVER ARRIVES, because the wearer
+            # could not possibly have acted on a push that never rendered.
+            # Scoring it 0 would inject a systematic false negative into the
+            # one axis whose whole job is precision, and it would be a
+            # manufactured one -- the kind that looks like evidence.
+            #
+            # `observable=0` means the glasses were off the wearer's face.
+            # Asking for a judgement we cannot obtain is worse than not
+            # asking, so the item is left unlabelled and explained.
+            if not row["observable"]:
+                print(f"  #{row['id']}  {row['decision']:<5} {row['cls']:<12} "
+                      f"{row['source'][:10]:<10}")
+                print(f"       {row['line'][:78]}")
+                print("       NOT LABELABLE — the glasses were off your face "
+                      "or the link was down when this was judged, so 'no "
+                      "reaction' carries no information. Left unlabelled on "
+                      "purpose: a missing label is not a negative one.")
+                print()
+                skipped_censored += 1
+                continue
+
+            mark = "" if row["observable"] else ""
             print(f"  #{row['id']}  {row['decision']:<5} {row['cls']:<12} "
                   f"{row['source'][:10]:<10}")
             print(f"       {row['line'][:78]}")
@@ -604,7 +629,9 @@ async def run(args: argparse.Namespace) -> int:
                 continue
             print("       (unrecognised; skipped)")
 
-        print(f"\n  labelled {labelled} of {len(pending)}")
+        note = (f"  {skipped_censored} not labelable (link/censor)"
+                if skipped_censored else "")
+        print(f"\n  labelled {labelled} of {len(pending)}{note}")
         stats = rev.label_stats()
         print(f"  {stats}")
         rev.close()

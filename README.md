@@ -453,6 +453,7 @@ corrections are kept visible rather than quietly edited:
 | 19 | [The wiring audit](documents/19-wiring-audit.md) | What is described as working and is not: the dormant plugin seam, a gate that stopped running, and a decision function that did not exist. |
 | 20 | [The evidence bridge](documents/20-evidence-bridge.md) | Why the policy could not change, a metric that measured its own deferrals, and absent-is-not-zero. |
 | 21 | [Phase 3 findings](documents/21-phase3-findings.md) | Two bugs that would have shipped, the observability cell, and why the 299-push target is unreachable. |
+| 22 | [Verifying an interruption](documents/22-interruption-verification.md) | The literature is mostly empty here; a link drop is censoring, not delay; there is no evidence for a numeric budget. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.

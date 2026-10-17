@@ -60,6 +60,12 @@ from typing import Iterable, Optional
 # here: the wearer asking for more says the *subject* matters, but weakly --
 # it just as often means the summary was thin, which is a detail-generation
 # signal, not a relevance signal.
+# The ordering is load-bearing, not tuned: `expand` is deliberately the weakest
+# positive because on a 120-character display "tapped for more" usually means
+# "I didn't understand this" -- which is a statement about LEGIBILITY, not
+# about whether the content was worth interrupting for (see documents/22, and
+# Janaka et al. ISMAR-Adjunct 2023 on attention cost of OHMD text). It
+# therefore must never be written into the decisions ledger's `label` column.
 EVENT_WEIGHTS: dict[str, float] = {
     "expand": 0.25,   # asked for more detail -> topic matters somewhat
     "confirm": 0.4,   # accepted as sufficient -> the framing worked
