@@ -482,6 +482,198 @@ def enforce_word_budget(text: str, max_words: int = DEFAULT_MAX_DISPLAY_WORDS) -
     return enforce_display_budget(text, max_words=max_words)
 
 
+@dataclass
+class GlanceabilityCheck:
+    """
+    Result of the pre-display glanceability gate.
+
+    The gate exists because the decision model turned out to be the wrong tool
+    here: it scores *concreteness* well (AUC 0.838 against a 25-line regex's
+    0.688) but is completely blind to fact burial, which is the failure the
+    wearer actually notices. A cheap regex catches referent-lead and hedged
+    summaries; the model is better used offline, after display, as a logging
+    judge that eventually earns real calibration data.
+
+    Cost is ~25 lines of arithmetic and zero latency, which is what makes it
+    suitable as a *blocking* check on the display path.
+    """
+
+    ok: bool
+    reason: str
+    score: float
+    features: dict
+
+    def why(self) -> str:
+        return (
+            f"{self.reason} (score={self.score:.2f}, "
+            + " ".join(f"{k}={v:g}" for k, v in self.features.items())
+            + ")"
+        )
+
+
+# Words that are concrete on their own and start a summary usefully.
+_CONCRETE_LEXICON = frozenset("""
+monday tuesday wednesday thursday friday saturday sunday today tonight
+now tomorrow yesterday morning afternoon evening night urgent deadline expires
+expiry failed failing error errors red green passed failing blocked stuck
+minutes minute hours hour days day seconds second booked scheduled cancelled
+""".split())
+
+_TIME_RE = re.compile(
+    r"\b\d{1,2}:\d{2}\b|\b\d{1,3}\s*(?:minutes?|mins?|hours?|hrs?|days?)\b"
+    r"|\b(?:now|here|inside|today|tonight|tomorrow|yesterday|monday|tuesday"
+    r"|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+_PROPER_NOUN_RE = re.compile(r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]{2,}")
+_CONCRETE_TOKEN_RE = re.compile(
+    r"\b\d[\d,.:]*\b|" + "|".join(sorted(_CONCRETE_LEXICON))
+)
+
+
+def glanceability_features(text: str) -> dict:
+    """
+    Cheap features for "can this be understood in one glance".
+
+    Four, exactly as the baseline was specified before any model was run, so
+    the numbers stay reproducible:
+
+    * ``digit``     — contains a digit
+    * ``proper``    — contains a capitalised non-sentence-initial word
+    * ``time``      — matches a clock time or relative-time expression
+    * ``lead``      — words before the first concrete token, capped at 6
+    """
+    clean = strip_display_noise(text)
+    if not clean:
+        return {"digit": 0.0, "proper": 0.0, "time": 0.0, "lead": 6.0}
+
+    digit = 1.0 if re.search(r"\d", clean) else 0.0
+    proper = 1.0 if _PROPER_NOUN_RE.search(clean) else 0.0
+    time = 1.0 if _TIME_RE.search(clean) else 0.0
+
+    lead = 6.0
+    match = _CONCRETE_TOKEN_RE.search(clean)
+    if match:
+        lead = min(6.0, float(len(clean[: match.start()].split())))
+
+    return {"digit": digit, "proper": proper, "time": time, "lead": lead}
+
+
+def glanceability_score(text: str) -> float:
+    """
+    Baseline glanceability score.
+
+    +1 digit, +1 proper noun, +1 time, minus the fraction of words spent before
+    the first concrete token. Tuned by nobody; this is the reference the
+    decision model had to beat.
+    """
+    f = glanceability_features(text)
+    return f["digit"] + f["proper"] + f["time"] - min(f["lead"], 6.0) / 6.0
+
+
+# Hedged framing. A digit inside one of these is a case number, not a fact --
+# "Regarding case 4471, there are some points to discuss later" is concrete by
+# every count and says nothing.
+_HEDGE_RE = re.compile(
+    r"\b(?:later|eventually|sometime|when convenient|at some point|"
+    r"points? to discuss|to discuss|to consider|consider reviewing|"
+    r"there (?:are|is) some|some (?:points?|issues?|things?|updates?)|"
+    r"you may|you might|may want to|might want to|keep in mind)\b",
+    re.IGNORECASE,
+)
+
+# Below this the summary is judged not glanceable and gets repaired or dropped.
+GLANCEABILITY_MIN = 0.5
+
+
+def check_glanceable(text: str, *, minimum: float = GLANCEABILITY_MIN) -> GlanceabilityCheck:
+    """
+    Blocking pre-display check.
+
+    Two failure modes are cheap to detect and expensive to show:
+
+    * a summary opening with a bare referent ("This was fixed.") never puts the
+      fact anywhere the eye lands;
+    * a summary with no digit, name or time in it is all connective tissue.
+
+    Fact burial is **not** detectable here — neither judge catches it — which
+    is why :func:`repair_buried_fact` exists.
+    """
+    f = glanceability_features(text)
+    score = glanceability_score(text)
+    clean = strip_display_noise(text)
+
+    if not clean:
+        return GlanceabilityCheck(False, "empty", score, f)
+
+    if f["lead"] >= 6.0 and not f["digit"] and not f["time"]:
+        return GlanceabilityCheck(
+            False, "no concrete token in the first six words", score, f
+        )
+
+    words = clean.split()
+    if words and words[0].lower() in {"this", "it", "that", "they", "he", "she"}:
+        return GlanceabilityCheck(
+            False, "opens with a bare referent", score, f
+        )
+
+    if _HEDGE_RE.search(clean):
+        return GlanceabilityCheck(
+            False, "hedged framing with no concrete claim", score, f
+        )
+
+    if score < minimum:
+        return GlanceabilityCheck(False, "no concrete anchor", score, f)
+
+    return GlanceabilityCheck(True, "ok", score, f)
+
+
+def repair_buried_fact(text: str) -> str:
+    """
+    Move the clause carrying the concrete token to the front.
+
+    Deterministic, no model, and it addresses exactly the failure both judges
+    are blind to: the fact is present but rendered in the last line, outside
+    the first ~48 characters the wearer actually resolves in a glance.
+    """
+    clean = strip_display_noise(text)
+    if not clean:
+        return clean
+
+    # Split into clause-ish units on sentence and clause boundaries.
+    clauses = [c.strip() for c in re.split(r"(?<=[.!?;])\s+|\s+[-,]\s+", clean) if c.strip()]
+    if len(clauses) < 2:
+        return clean
+
+    scored = []
+    for index, clause in enumerate(clauses):
+        # A real number beats a vague lexicon word. Without this weighting,
+        # "The migration is scheduled." (which contains the lexicon word
+        # "scheduled") outranks "API keys rotate 2026-11-01", and the reorder
+        # silently does nothing.
+        has_digit = 2.0 if re.search(r"\d", clause) else 0.0
+        has_concrete = 1.0 if _CONCRETE_TOKEN_RE.search(clause) else 0.0
+        has_time = 1.0 if _TIME_RE.search(clause) else 0.0
+        lead = min(6.0, float(len(clause.split()))) / 6.0
+        scored.append((has_digit + has_concrete + has_time - 0.15 * lead,
+                       -index, clause))
+
+    best_score = max(s for s, _, _ in scored)
+    if best_score <= 0:
+        return clean  # nothing concrete anywhere; nothing to reorder toward
+
+    # Highest score first; original order breaks ties. Sorting on score (not on
+    # index) is the whole point -- an earlier version preserved the original
+    # order here and silently did nothing.
+    reordered = [c for _, _, c in sorted(scored, key=lambda t: (-t[0], -t[1]))]
+    joined = " ".join(reordered).rstrip(".")
+    if not joined:
+        return clean
+
+    # Respect the display budget after reordering.
+    return enforce_display_budget(joined)
+
+
 def word_count(text: str | None) -> int:
     return len((text or "").split())
 
@@ -640,11 +832,30 @@ async def condense_for_glasses(
     if not text.strip():
         raise LLMStageError("stage 2 returned an empty response")
 
-    return enforce_display_budget(
+    final = enforce_display_budget(
         text,
         max_chars=config.max_display_chars,
         max_words=config.max_display_words,
     )
+
+    # Pre-display glanceability check. On failure we REPAIR rather than
+    # suppress: suppression is the most expensive thing this system can do,
+    # and the cheap deterministic repair handles the case both the regex and
+    # the decision model are blind to (fact present, rendered last).
+    check = check_glanceable(final)
+    if not check.ok:
+        repaired = repair_buried_fact(final)
+        if repaired and check_glanceable(repaired).ok:
+            log.info("stage 2 repaired: %s -> %r", check.reason, repaired)
+            final = repaired
+            check = check_glanceable(final)
+        else:
+            # Still weak: keep it, but say so, so the caller can log it as a
+            # candidate for the review queue rather than silently degrading.
+            log.warning("stage 2 output not glanceable: %s", check.why())
+            final = repaired or final
+
+    return final
 
 
 # ---------------------------------------------------------------------------
