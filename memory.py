@@ -49,6 +49,18 @@ EVENT_WEIGHTS: dict[str, float] = {
     "dismiss": -0.6,  # pushed away -> low interest
 }
 
+# Observations: logged signals that answer a different question from
+# "was this worth the wearer's attention?". They deliberately carry NO topic
+# weight -- a drill that found nothing says something about how detail is
+# generated, not about the subject matter. Mixing them into EVENT_WEIGHTS
+# would corrupt the relevance estimate.
+OBSERVATION_KINDS = frozenset({
+    "drill_miss",     # tapped for detail, none available
+    "repaired",       # stage 2 output failed the glanceability gate and was repaired
+    "shown",          # placed on the lens
+    "suppressed",     # filtered before ever reaching the lens
+})
+
 # How fast interest decays. A topic you cared about last month should not
 # dominate today's summaries.
 HALF_LIFE_DAYS = 7.0
@@ -253,10 +265,11 @@ class FeedbackStore:
 
     def add_event(self, card_id: int, kind: str, detail: str = "") -> Interaction:
         """Record a wearer reaction to a card."""
-        if kind not in EVENT_WEIGHTS:
+        if kind not in EVENT_WEIGHTS and kind not in OBSERVATION_KINDS:
             raise ValueError(
-                f"unknown event kind {kind!r}; expected one of "
-                f"{sorted(EVENT_WEIGHTS)}"
+                f"unknown event kind {kind!r}; expected a reaction "
+                f"{sorted(EVENT_WEIGHTS)} or an observation "
+                f"{sorted(OBSERVATION_KINDS)}"
             )
         now = time.time()
         self._conn.execute(

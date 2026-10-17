@@ -423,6 +423,40 @@ async def repl(
 # ---------------------------------------------------------------------------
 
 async def run(args: argparse.Namespace) -> int:
+    # -- policy: contested questions, shown as switches --------------------
+    if args.policy_axes:
+        from policy import describe_axes
+
+        print(describe_axes())
+        return 0
+
+    if args.set_policy:
+        from policy import save_overrides
+
+        pairs = [p for p in args.set_policy if "=" in p]
+        if not pairs:
+            print("expected axis=option, e.g. g1_model=on", file=sys.stderr)
+            return 2
+        overrides = {}
+        for pair in pairs:
+            axis_id, _, option = pair.partition("=")
+            overrides[axis_id.strip()] = option.strip()
+        try:
+            path = save_overrides(overrides)
+        except ValueError as exc:
+            print(f"invalid: {exc}", file=sys.stderr)
+            return 2
+        print(f"saved overrides -> {path}")
+
+    if args.policy:
+        from policy import load as load_policy
+
+        pol = load_policy()
+        print("Resolved policy (contested decisions, each with its deciding "
+              "metric):\n")
+        print(pol.report())
+        return 0
+
     # -- discovery-only commands, before touching the radio ----------------
     if args.list_providers:
         print("Provider presets (all speak the OpenAI Chat Completions API):\n")
@@ -685,6 +719,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", metavar="PATH",
         help="feedback database path "
              "(default: ~/.local/share/g1-ble-backend/feedback.db)",
+    )
+    parser.add_argument(
+        "--policy", action="store_true",
+        help="show the resolved policy for contested decisions, and exit",
+    )
+    parser.add_argument(
+        "--policy-axes", action="store_true",
+        help="list every policy axis, its options and its deciding metric",
+    )
+    parser.add_argument(
+        "--set-policy", metavar="AXIS=OPTION", action="append",
+        help="pin a policy axis manually, e.g. --set-policy g1_model=on "
+             "(persists to the policy file)",
     )
 
     # -- connection -------------------------------------------------------

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from memory import Card, FeedbackStore, extract_keywords
+from policy import resolve
 from pipeline import (
     LLMConfig,
     LLMStageError,
@@ -108,7 +109,12 @@ class Session:
         config: LLMConfig | None = None,
         client=None,
         touch_actions: Optional[dict[int, str]] = None,
+        policy=None,
     ) -> None:
+        # Contested design questions are resolved at setup and read here as a
+        # flat answer. The runtime does not re-argue them; it reads a decision
+        # that a metric already made. See policy.py.
+        self.policy = policy if policy is not None else resolve()
         self.send = send
         self.store = store
         self.config = config or LLMConfig(
@@ -207,6 +213,16 @@ class Session:
         top = self.current
         if top is None:
             return None
+
+        # Deferred by policy: on-demand detail puts the slowest component on
+        # the interaction most likely to be abandoned when it is slow. The log
+        # decides, not an opinion; until drill_miss_rate is measured, tap does
+        # not spin up a generation.
+        if not self.policy.on("detail_generation"):
+            self.store.add_event(top.card.id, "drill_miss", "deferred-by-policy")
+            log.info("drill-down deferred: policy detail_generation=off "
+                     "(drill_miss recorded; the log decides)")
+            return top
 
         self.stats.expansions += 1
         client = self._ensure_ready()

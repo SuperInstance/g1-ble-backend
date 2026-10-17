@@ -204,16 +204,51 @@ Not a platform. An outcome.
 
 ---
 
-## 7. Contested — unresolved on the record
+## 7. Contested — implemented as options, not verdicts
 
-**Does winnow survive at all?** Claude cuts it *everywhere*, including the
+> **A disagreement between reviewers is a measurement to be taken, not a
+> position to be defended.** Every question below is a declared axis in
+> `policy.py`, with its deciding metric named *before* the data exists and a
+> conservative default that applies until it does.
+
+**Expand at setup, streamline at runtime.** At install time the axes are open
+and calibrate against real measurements. At runtime there is no branching on
+opinions: one resolved `Policy` object is read, and the hot path decides
+nothing.
+
+```bash
+python main.py --policy-axes     # every axis, its options, its deciding metric
+python main.py --policy          # current resolution and what is still open
+python main.py --set-policy g1_model=on     # pin one by hand, persists
+```
+
+| axis | options | default | settled by |
+|---|---|---|---|
+| `examination_source` | `touchbar`/`head_up`/`both` | `touchbar` | ρ = θ/A_b from the calibration walk (≥1.6) |
+| `g1_model` | `on`/`off` | `off` | `queue_worth_rate` over ≥100 review labels |
+| `interrupt_gate` | `rules`/`learned` | `rules` | ≥299 clean pushes |
+| `detail_generation` | `off`/`on` | `off` | `drill_miss_rate` over the first fortnight |
+| `push_enabled` | `off`/`on` | `off` | a full fortnight of tier labels |
+
+**Safety property, tested:** with zero evidence every axis holds its
+conservative default. No axis can be switched on by opinion.
+
+`detail_generation` is already wired into the live path — with the default,
+a tap logs `drill_miss` and does not spin up a generation. Observations are
+stored separately from reactions (`OBSERVATION_KINDS` in `memory.py`) because a
+drill that found nothing says something about *how detail is generated*, not
+about the subject, and mixing the two would corrupt the relevance estimate.
+
+### The reasoning underneath each axis, for the record
+
+**Does winnow survive at all?** (axis: `g1_model`) Claude cuts it *everywhere*, including the
 offline judge, arguing 299 samples are needed and the VRAM ping-pong is not
 worth it. zcode keeps it for G1 and as a batched offline judge, because G1
 errors are cheap and 0.898 is adequate for a task whose failure mode is a lost
 queue slot. **Unresolved.** Lean zcode on G1; the offline judge is genuinely
 marginal and Claude's objection to it is fair.
 
-**Is the examination signal usable at all?** Both convergence reviewers
+**Is the examination signal usable at all?** (axis: `examination_source`) Both convergence reviewers
 attacked Experiment C harder than C attacked itself. C's 275 ms maximum gait run
 is circular — a simulated sine caps it by construction. More seriously, **a
 dwell filter cannot distinguish looking up at the glasses from looking up at a
@@ -221,7 +256,7 @@ sign or a person.** So `examined` is an upper bound only, and contamination is
 worse than C reported. Claude suggests that if p99 > 333 ms, only the TouchBar
 opens the queue and head-up stops being an examination signal at all.
 
-**Is the 0.813 boundary learnable at all?** Claude: the personal-calibration
+**Is the 0.813 boundary learnable at all?** (axis: `interrupt_gate`) Claude: the personal-calibration
 framing is unproven — the alternative is that it is unlearnable noise. zcode
 concedes this and says day-14 labels settle it; do not pre-commit a learner.
 
