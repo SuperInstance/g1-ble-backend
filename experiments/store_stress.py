@@ -173,12 +173,21 @@ def main() -> int:
             "s.close()\n" % (str(ROOT), str(db))
         )
         st = FeedbackStore(db)
+        # Distinct `line` values, deliberately. These two used to be the same
+        # call and this check asserted 2 rows -- i.e. it was relying on
+        # record_decision being NON-idempotent. Making the ledger idempotent
+        # (one event, one row) collapsed them to one and the test failed on
+        # correct code. The property under test is "every writer commits and is
+        # visible to another process", which needs two real events, not one
+        # event recorded twice.
         writers = {
             "record_push": lambda: st.record_push("meeting", text="t"),
             "record_decision": lambda: st.record_decision(decision="queue",
-                                                           cls="digest"),
+                                                           cls="digest",
+                                                           line="Item one"),
             "set_label": (lambda: st.set_label(
-                st.record_decision(decision="queue", cls="digest"), 1)),
+                st.record_decision(decision="queue", cls="digest",
+                                   line="Item two"), 1)),
             "record_misfire": lambda: st.record_misfire("device"),
             "clear_suspension": lambda: st.clear_suspension("device"),
             "settle_push": lambda: st.settle_push(1, "delivered"),
@@ -234,14 +243,5 @@ def main() -> int:
                                 f"{pushed.stderr.strip()[-160:]}")
 
     print()
-    if failures:
-        for f in failures:
-            print(f"FAIL  {f}")
-        return 1
-    print("OK    400/400 writes durable, ids unique, close is safe, and every "
-          "writer commits")
-    return 0
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    print()

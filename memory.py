@@ -504,12 +504,29 @@ class FeedbackStore:
                 -- argument documents/21 makes about queued rows counting
                 -- toward clean_pushes.
                 dry_run      INTEGER NOT NULL DEFAULT 0,
+                -- One row per DISTINCT EVENT, not per decision attempt.
+                --
+                -- Processing the same spool twice used to append a second and
+                -- third copy of every candidate, and `n_labels` feeds the
+                -- g1_model volume gate (>=100). Re-running a dry run would
+                -- therefore fill the ledger with duplicates and walk the
+                -- label count toward a threshold with no additional ground
+                -- truth in it -- the exact quiet inflation this project keeps
+                -- fighting elsewhere.
+                --
+                -- Keyed on the event's identity, not on the action, so a
+                -- decision that CHANGES because the policy changed updates
+                -- the existing row rather than adding one. It stays one item
+                -- of evidence either way.
+                dedup_key    TEXT    NOT NULL DEFAULT '',
                 label        INTEGER CHECK (label IN (0,1)),
                 already_know INTEGER CHECK (already_know IN (0,1)),
                 reviewed_at  REAL
             );
-            CREATE INDEX IF NOT EXISTS idx_decisions_unlabelled
+                        CREATE INDEX IF NOT EXISTS idx_decisions_unlabelled
                 ON decisions(label, decision, created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_dedup
+                ON decisions(dedup_key) WHERE dedup_key != '';
             """
             )
             self._conn.commit()
@@ -1160,17 +1177,46 @@ class FeedbackStore:
         the default is the optimistic one because a card shown to a wearer who
         was wearing the glasses is normally observable, and the failure being
         guarded against is the opposite one.
+
+        IDEMPOTENT. Processing the same event twice returns the same row and
+        does not create a second one, because `n_labels` is a count of ground
+        truth and a repeated dry run adds none. When the action CHANGES --
+        a policy change making a queued candidate eligible -- the existing row
+        is updated rather than duplicated: it is still one event, and it
+        should still be one item of evidence. An existing LABEL is preserved;
+        a human's answer is not overwritten by a later automatic pass.
+
+        The key is (source, class, line, ts), and the `ts` a caller passes is
+        the EVENT's time, not the time of writing. A caller that lets it
+        default to `time.time()` gets a fresh key per call and defeats the
+        whole mechanism while every row still looks perfectly plausible.
+        So the rule is: pass the event's own timestamp whenever there is
+        one, and prefer that a duplicate be UPDATED in place rather than
+        inserted -- see also `record_verdict`, which is the shipped caller.
         """
         now = time.time() if ts is None else float(ts)
+        key = "|".join((source, cls, line[:120], repr(round(now, 3))))
         with self._lock:
-            cur = self._conn.execute(
-                "INSERT INTO decisions (created_at, decision, cls, source, "
-                "line, gate, reason, observable, dry_run) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (now, decision, cls, source, line[:120], gate, reason[:200],
-                 1 if observable else 0, 1 if dry_run else 0),
-            )
-            row = int(cur.lastrowid)
+            existing = self._conn.execute(
+                "SELECT id FROM decisions WHERE dedup_key = ?", (key,)
+            ).fetchone()
+            if existing is not None:
+                row = int(existing["id"])
+                self._conn.execute(
+                    "UPDATE decisions SET decision = ?, gate = ?, reason = ?, "
+                    "observable = ?, dry_run = ? WHERE id = ?",
+                    (decision, gate, reason[:200],
+                     1 if observable else 0, 1 if dry_run else 0, row),
+                )
+            else:
+                cur = self._conn.execute(
+                    "INSERT INTO decisions (created_at, decision, cls, source, "
+                    "line, gate, reason, observable, dry_run, dedup_key) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (now, decision, cls, source, line[:120], gate, reason[:200],
+                     1 if observable else 0, 1 if dry_run else 0, key),
+                )
+                row = int(cur.lastrowid)
         # Explicit commit, like add_card/add_event/set_meta above.
         # This connection opens in DEFERRED mode, so an uncommitted
         # write is invisible to any other process and is lost when

@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -63,22 +64,25 @@ def check(label: str, ok: bool, detail: str = "") -> None:
         FAILURES.append(label)
 
 
-def meeting(mins: float, accepted: bool = True) -> q.Candidate:
-    return q.Candidate(source="cal", cls="meeting", line="Standup with Ana",
-                       ts=NOW, subject="meeting", accepted=accepted,
-                       minutes_until=mins)
+def meeting(mins: float, accepted: bool = True, *,
+            ts=None, line: str = "Standup with Ana") -> q.Candidate:
+    return q.Candidate(source="cal", cls="meeting", line=line,
+                       ts=NOW if ts is None else ts, subject="meeting",
+                       accepted=accepted, minutes_until=mins)
 
 
-def blocked(seconds: int, is_blocked: bool = True) -> q.Candidate:
+def blocked(seconds: int, is_blocked: bool = True, *,
+            ts=None) -> q.Candidate:
     return q.Candidate(source="build", cls="blocked_job", line="CI red on main",
-                       ts=NOW, subject="infra", blocked=is_blocked,
-                       elapsed_s=seconds)
+                       ts=NOW if ts is None else ts, subject="infra",
+                       blocked=is_blocked, elapsed_s=seconds)
 
 
-def device(pct) -> q.Candidate:
+def device(pct, *, ts=None) -> q.Candidate:
     meta = {} if pct is None else {"battery_pct": pct}
     return q.Candidate(source="glasses", cls="device", line="Battery low",
-                       ts=NOW, subject="glasses", meta=meta)
+                       ts=NOW if ts is None else ts, subject="glasses",
+                       meta=meta)
 
 
 def main() -> int:
@@ -374,7 +378,13 @@ def main() -> int:
     # somebody labels something, and this is the path that makes them derived.
     with _tf.TemporaryDirectory() as tmp:
         loop_store = FeedbackStore(Path(tmp) / "loop.db")
-        verds = q.plan([meeting(5), blocked(600), device(4), meeting(99)],
+        # Distinct arrival times. Two meetings with the same text are two
+        # events because they arrived at different moments; the ledger's dedup
+        # key is (source, class, line, ts), so sharing one timestamp would make
+        # them one row. That is correct behaviour on real data and a lie in a
+        # fixture, so the fixture now says what it means.
+        verds = q.plan([meeting(5), blocked(600), device(4),
+                        meeting(99, ts=NOW + timedelta(minutes=1))],
                        budget=q.Budget(label_days=20), now=NOW)
         before, _ = q.evidence_from_store(loop_store)
         check("CONTROL: with nothing labelled, the label metrics are ABSENT",
@@ -414,18 +424,120 @@ def main() -> int:
               f"worth={after.queue_worth_rate} from "
               f"{stats_after['queue_labelled']} "
               f"queued rows; {len(pushed_rows)} dry-run pushes correctly "
-              f"contributed 0, "
-              f"contribute")
+              f"contributed 0")
         check("clean_pushes still ABSENT -- none of these pushes was the "
               "result of a real send",
               after.clean_pushes is None, f"{after.clean_pushes}")
 
-        censored = q.Verdict(meeting(5), "push", "eligible", "eligible")
+        censored = q.Verdict(meeting(5, ts=NOW + timedelta(minutes=2)),
+                            "push", "eligible", "eligible")
         q.record_verdict(loop_store, censored, observable=False)
         check("a push made with the link down is recorded unlabelable",
               any(not r["observable"] for r in loop_store.unlabelled()),
               "censoring applies to PUSHES, not to terminal review")
         loop_store.close()
+
+    print("\n13. re-recording the same event does not manufacture ground truth")
+    # This suite measures the review loop, so an inflated ledger is a broken
+    # measuring instrument, not a cosmetic bug. `n_labels` is the numerator
+    # behind g1_model's >=100 volume gate: if replaying one spool file three
+    # times yields three times the labels, then re-running a dry run walks the
+    # system toward switching itself on with nothing new observed. Every number
+    # still looks like a count, which is why it needs its own test.
+    #
+    # The first fix threaded a dedup_key through record_decision but left
+    # record_verdict calling it WITHOUT a timestamp, so the key fell back to
+    # time.time() and was different on every run. 3 runs -> 15 rows for 5
+    # candidates. The unique index was there and correct; nothing ever hit it.
+    #
+    # And it was WORSE than a plain bug, which the first version of this test
+    # nearly shipped. The fallback key is round(time.time(), 3) -- MILLISECOND
+    # precision. Nine back-to-back writes all land inside one millisecond, so
+    # they share a key and the dedup appears to work; a tenth write that
+    # straddles a boundary suddenly produces a new row. Measured here with the
+    # fix reverted: four rapid writes -> [1, 1, 1, 1], and one that crossed the
+    # boundary -> [1, 1, 1, 2]. Whether duplicates appeared depended on how fast
+    # the disk was. That is the failure mode this whole project is about, so
+    # the test below pins the clock instead of racing it.
+    with _tf.TemporaryDirectory() as tmp:
+        idem = FeedbackStore(Path(tmp) / "idem.db")
+        cands = [meeting(5), blocked(600), device(4)]
+        first = q.plan(cands, budget=q.Budget(label_days=20), now=NOW)
+        ids_run1 = [q.record_verdict(idem, v, dry_run=True) for v in first]
+        rows_after_1 = len(idem.unlabelled())
+
+        # Deterministic assertion: the row's own timestamp is the EVENT's,
+        # not the moment of writing. This is what fails loudly when the fix is
+        # removed, regardless of how fast the writes happen to be.
+        stored = idem._conn.execute(
+            "SELECT created_at FROM decisions WHERE id = ?", (ids_run1[0],)
+        ).fetchone()["created_at"]
+        check("the ledger stores the EVENT's timestamp, not the write time",
+              abs(stored - NOW.timestamp()) < 1e-6,
+              f"created_at={stored} vs event={NOW.timestamp()} "
+              f"(a wall clock would be within seconds of this run and "
+              f"different on the next, which is the whole defect)")
+
+        # Replay the identical spool, twice more, as an operator would --
+        # sleeping long enough that a wall-clock key would be guaranteed to
+        # differ, which is what made the original bug intermittent.
+        time.sleep(0.01)              # > 1ms: a ms-quantised key would differ
+        ids_run2 = [q.record_verdict(idem, v, dry_run=True) for v in first]
+        time.sleep(0.01)
+        ids_run3 = [q.record_verdict(idem, v, dry_run=True) for v in first]
+        rows_after_3 = len(idem.unlabelled())
+
+        check("CONTROL: three replays of one spool still yield one row each",
+              rows_after_1 == len(first) == rows_after_3,
+              f"{rows_after_1} -> {rows_after_3} rows for {len(first)} "
+              f"candidates")
+        check("and they are the SAME rows, not merely the same count",
+              ids_run1 == ids_run2 == ids_run3,
+              f"{ids_run1} vs {ids_run2} vs {ids_run3}")
+
+        # A human answered row ids_run1[0]. A later automatic pass must not
+        # erase that: it is the only ground truth in the system. The labelled
+        # row also leaves the review queue, so the expected count drops by one
+        # and must stay there -- a replay that resurrected it would show up as
+        # the count going back UP, which is the silent failure.
+        idem.set_label(ids_run1[0], 1)
+        q.record_verdict(idem, first[0], dry_run=True)
+        rows = idem.unlabelled()
+        check("a replay preserves the human's label",
+              len(rows) == rows_after_3 - 1
+              and all(r["id"] != ids_run1[0] for r in rows),
+              f"{len(rows)} unlabelled rows; the labelled row {ids_run1[0]} "
+              f"stays answered and is not re-queued")
+
+        # A CHANGED action is still the same event. It must update in place,
+        # so it stays one item of evidence rather than becoming two. Uses row 1,
+        # which is deliberately still unlabelled so it is visible in the queue.
+        flipped = q.Verdict(first[1].candidate, "push", "eligible", "forced")
+        q.record_verdict(idem, flipped, dry_run=True)
+        rows = idem.unlabelled()
+        check("a decision that CHANGES updates in place, not as a new row",
+              len(rows) == rows_after_3 - 1
+              and any(r["id"] == ids_run1[1] and r["decision"] == "push"
+                      for r in rows),
+              f"{len(rows)} rows; row {ids_run1[1]} is now "
+              f"{[r['decision'] for r in rows if r['id'] == ids_run1[1]]}")
+
+        # Finally the direct test of the actual defect: two events that differ
+        # ONLY by timestamp must stay distinct, which only works if the EVENT
+        # time is in the key rather than the wall clock.
+        hour_later = (NOW + timedelta(hours=1)).timestamp()
+        idem.record_decision(decision="queue", cls="meeting", source="cal",
+                             line="Standup with Ana", ts=hour_later)
+        n_new = len(idem.unlabelled())
+        check("two events differing only in time stay two rows",
+              n_new == rows_after_3,
+              f"{n_new} rows; a later event with identical text is its own row")
+        idem.record_decision(decision="queue", cls="meeting", source="cal",
+                             line="Standup with Ana", ts=hour_later)
+        check("...and a later replay of the NEW event still folds in",
+              len(idem.unlabelled()) == n_new,
+              "replaying the new event did not duplicate it either")
+        idem.close()
 
     print()
     if FAILURES:

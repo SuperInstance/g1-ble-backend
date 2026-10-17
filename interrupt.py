@@ -741,6 +741,16 @@ def record_verdict(store, verdict: "Verdict", *, observable: bool = True,
     the wearer cannot have reacted, so the decision is recorded as
     unobservable and `--review` refuses to label it: a link drop is
     censoring, not a negative label (documents/22).
+
+    The candidate's OWN timestamp is passed through, not the wall clock.
+    That is what makes the ledger row idempotent: `record_decision` keys on
+    it, so re-reading the same spool file twice recognises the same event
+    instead of inventing a new one. Using `time.time()` here instead would
+    mint a fresh key on every run, and re-running `--queue --queue-record`
+    would walk `n_labels` toward g1_model's 100-item volume gate without a
+    single new item of ground truth. The failure is quiet -- every number
+    still looks like a count -- which is exactly the kind of thing this
+    project has been burned by before.
     """
     c = verdict.candidate
     return store.record_decision(
@@ -752,6 +762,7 @@ def record_verdict(store, verdict: "Verdict", *, observable: bool = True,
         reason=verdict.reason,
         observable=observable,
         dry_run=dry_run,
+        ts=c.ts.timestamp(),
     )
 
 
