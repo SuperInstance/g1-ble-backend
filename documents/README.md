@@ -26,6 +26,7 @@ changed* is more useful than a clean final story.
 | 13 | [Round 2: Claude convergence](13-round2-claude-convergence.md) | Final design proposal, plus the sharpest argument in the corpus. |
 | 14 | [Round 2: zcode convergence](14-round2-zcode-convergence.md) | Final design proposal, partly in disagreement with 13. |
 | 15 | [Adversarial finding triage](15-adversarial-finding-triage.md) | What survived an attack, what did not, and what is still open. |
+| 16 | [Play-test: the first real run](16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
 
 The synthesised design is [`../DESIGN.md`](../DESIGN.md).
 

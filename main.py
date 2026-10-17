@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import threading
 import contextlib
 import logging
 import sys
@@ -54,6 +55,7 @@ from bleak.exc import BleakError
 from g1_driver import EvenG1Controller, hexdump
 from memory import FeedbackStore
 from pipeline import (
+    _lens_failure_line,
     DEFAULT_MAX_DISPLAY_CHARS,
     DEFAULT_MAX_DISPLAY_WORDS,
     DISPLAY_LINES,
@@ -276,12 +278,36 @@ async def prompt_user(message: str) -> str:
     """
     Read one line without blocking the event loop.
 
-    ``input()`` runs on a worker thread so the loop keeps servicing the
-    heartbeat and incoming TouchBar notifications while the user thinks.
-    Calling it directly would freeze the session, and a frozen loop stops the
-    heartbeat — the G1 drops the link after ~32s idle.
+    ``input()`` runs off the loop so the loop keeps servicing the heartbeat
+    and incoming TouchBar notifications while the user thinks. Calling it
+    directly would freeze the session, and a frozen loop stops the heartbeat
+    -- the G1 drops the link after ~32s idle.
+
+    Deliberately NOT ``asyncio.to_thread``. That uses the loop's default
+    executor, which ``asyncio.run`` joins during shutdown -- and the worker
+    sitting in C-level ``input()`` cannot be interrupted, so Ctrl-C at the
+    prompt appeared to do nothing and the process had to be killed or coaxed
+    with an extra Enter. Verified: SIGINT mid-prompt, no newline, 124 (hung).
+
+    A daemon thread fixes it: the interpreter never waits for one at exit, and
+    nothing joins it.
     """
-    return await asyncio.to_thread(input, message)
+    loop = asyncio.get_running_loop()
+    box: dict[str, object] = {}
+    done = asyncio.Event()
+
+    def _read() -> None:
+        try:
+            box["value"] = input(message)
+        except BaseException as exc:        # noqa: BLE001 -- relayed below
+            box["error"] = exc
+        loop.call_soon_threadsafe(done.set)
+
+    threading.Thread(target=_read, daemon=True).start()
+    await done.wait()
+    if "error" in box:
+        raise box["error"]                  # type: ignore[misc]
+    return str(box.get("value", ""))
 
 
 async def repl(
@@ -390,9 +416,22 @@ async def repl(
                 if not rest:
                     print("  usage: :text <literal>")
                     continue
+                # :text is a deliberate raw path, so the text is NOT silently
+                # budgeted -- an operator using it to reproduce an overflow
+                # needs the overflow. But it used to overflow with no word at
+                # all, which meant discovering the limit for the first time on
+                # hardware. Warn on the terminal, where it costs nothing.
+                over = fits_display(
+                    rest, chars_per_line=args.chars_per_line) > 5
                 try:
                     await build_sender(controller, args)(rest)
-                    print(f"  sent {word_count(rest)} words")
+                    print(f"  sent {len(rest)} chars, "
+                          f"{fits_display(rest, chars_per_line=args.chars_per_line)} "
+                          f"lines")
+                    if over:
+                        print(f"  ! over the {DEFAULT_MAX_DISPLAY_CHARS}-char "
+                              f"display budget -- the tail will not be visible "
+                              f"on the lenses")
                 except BleakError as exc:
                     print(f"  BLE error: {exc}")
                 continue
@@ -404,7 +443,7 @@ async def repl(
         try:
             card = await session.ask(line)
             print(f"\n>>> waveguide: {card.card.summary}")
-            print(f"    ({word_count(card.card.summary)} words, "
+            print(f"    ({len(card.card.summary)} chars, "
                   f"{fits_display(card.card.summary, chars_per_line=args.chars_per_line)} "
                   f"lines) — tap for more, double-tap to dismiss")
         except LLMUnavailable as exc:
@@ -1017,7 +1056,36 @@ def selftest() -> int:
               len(written[0]) <= DEFAULT_MAX_DISPLAY_CHARS, True)
         check("fallback non-empty", bool(written[0].strip()), True)
 
+        # Regression: a real 401 used to be rendered onto the lenses as
+        #   "LLM error. stage 1 (m) f" / "ailed: Error code: 401 -" /
+        #   " {'error': {'message':"
+        # -- three of five lines of exception repr, broken mid-word, with the
+        # only useful part buried. Found by running the real pipeline.
+        boom2 = _FakeClient(["x"], fail_at=0)
+        err_written: list[str] = []
+
+        async def send_err(text: str) -> None:
+            err_written.append(text)
+
+        await run_query("q", send_err, client=boom2, config=config, verbose=False)
+        line = err_written[0] if err_written else ""
+        check("lens failure line is short", len(line) <= 48, True)
+        check("lens failure line has no repr punctuation",
+              not any(ch in line for ch in "{}\'\""), True)
+        check("lens failure line fits in 2 display lines",
+              fits_display(line) <= 2, True)
+
     asyncio.run(async_checks())
+
+    for err, expect in (
+        ("Error code: 401 - {'error': {'message': 'bad key'}}", "auth"),
+        ("404 model not found", "not found"),
+        ("Request timed out after 30s", "timed out"),
+        ("Connection refused", "unreachable"),
+        (None, "No answer from model."),
+    ):
+        got = _lens_failure_line(err)
+        check(f"lens line classifies {str(err)[:24]!r}", expect in got, True)
 
     print()
     total = ble_status + (1 if failures else 0)

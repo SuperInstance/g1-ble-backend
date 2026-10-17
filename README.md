@@ -243,7 +243,7 @@ ollaya serve                                   # required for the two below
 | A clock feature **does not help** | Tested and **falsified**. Every veto variant made it worse. The errors are tier assignment, not time arithmetic. |
 | Glanceability: winnow beats a regex | 0.838 vs 0.688, paired bootstrap Δ +0.150 — but winnow verifies *concreteness*, not *glanceability*, and is blind to burial. |
 | Gaze has a **cliff** at ρ = θ/A_b ≥ 1.6 | Below it, fabricated glances *contaminate* labels rather than adding noise. |
-| Latency claims were ~5–7× optimistic | Real: **110 ms** sustained warm, 500 ms idle GPU, 3.55 s cold. |
+| Latency claims were ~5–7× optimistic | **CORRECTION.** 110 ms is `winnow`'s number and winnow is **not on the display path**. Measured end to end against a real model (2026-10-16, qwen2.5-coder:7b, RTX 4050): median **6.71 s**, max **19.55 s** — stage 1 alone is 85% of it, at 37.7 tok/s. **Not usable while walking.** See [play-test](#the-wearers-experience-measured). |
 | `winnow` fits alone, cannot share | 5826/6141 MiB resident — 95% of VRAM. |
 | `tev1` is unusable | No chat template; rejected by the OpenAI-compatible endpoint. |
 
@@ -369,6 +369,7 @@ corrections are kept visible rather than quietly edited:
 | 13 | [Round 2: Claude convergence](documents/13-round2-claude-convergence.md) | Final design proposal, plus the sharpest argument in the corpus. |
 | 14 | [Round 2: zcode convergence](documents/14-round2-zcode-convergence.md) | Final design proposal, partly in disagreement with 13. |
 | 15 | [Adversarial finding triage](documents/15-adversarial-finding-triage.md) | What survived an attack, what did not, and what is still open. |
+| 16 | [Play-test: the first real run](documents/16-playtest-first-real-run.md) | What happened when the real pipeline met a real model. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.

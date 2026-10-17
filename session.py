@@ -266,10 +266,21 @@ class Session:
         # the interaction most likely to be abandoned when it is slow. The log
         # decides, not an opinion; until drill_miss_rate is measured, tap does
         # not spin up a generation.
+        #
+        # But the gesture still has to CHANGE SOMETHING. Returning the same
+        # card without a lens write made the most-promised interaction a silent
+        # no-op: the wearer taps, sees precisely the same line, and has no way
+        # to tell a deferred drill from an ignored tap. The REPL then printed
+        # the unchanged text back as though something had happened. Say so in
+        # the cheapest way available -- the text already on the lenses.
         if not self.policy.on("detail_generation"):
             await self._record(top.card.id, "drill_miss", "deferred-by-policy")
             log.info("drill-down deferred: policy detail_generation=off "
                      "(drill_miss recorded; the log decides)")
+            try:
+                await self.send("Detail not ready. Tap again later.")
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("could not show deferral notice: %s", exc)
             return top
 
         self.stats.expansions += 1

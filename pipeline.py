@@ -178,6 +178,14 @@ def build_llm_config(provider: str | None = None) -> LLMConfig:
         or preset.default_primary
     )
     compressor = os.environ.get("G1_COMPRESSOR_MODEL") or preset.default_compressor
+    # A preset's compressor default names a model on the PRESET's endpoint.
+    # If the caller has redirected the base URL somewhere else -- a local
+    # Ollama, a proxy -- that name is very likely wrong there, and the failure
+    # is a 404 about a model the operator never asked for. Found by actually
+    # running it: `OPENAI_MODEL=qwen2.5-coder:7b` gave stage 1 the local model
+    # and left stage 2 asking OpenAI for gpt-4o-mini.
+    if base_url != preset.base_url:
+        compressor = os.environ.get("G1_COMPRESSOR_MODEL") or primary
 
     def _float(name_: str, default: float) -> float:
         raw = os.environ.get(name_)
@@ -933,6 +941,27 @@ class QueryResult:
 SendFn = Callable[[str], Awaitable]
 
 
+def _lens_failure_line(error: str | None) -> str:
+    """
+    What the lenses show when stage 1 produced nothing at all.
+
+    Short, fixed, and free of repr punctuation. The wearer cannot act on a
+    stack-shaped string, and every character spent on one is a character not
+    spent on their actual question. The specific cause still reaches the
+    terminal via the caller's log line, which is the audience that can use it.
+    """
+    text = (error or "").lower()
+    if "401" in text or "auth" in text or "api key" in text:
+        return "No answer. Model auth failed."
+    if "404" in text or "not found" in text:
+        return "No answer. Model not found."
+    if "timeout" in text or "timed out" in text:
+        return "No answer. Model timed out."
+    if "connect" in text or "refused" in text or "unreachable" in text:
+        return "No answer. Model unreachable."
+    return "No answer from model."
+
+
 async def run_query(
     query: str,
     send: SendFn,
@@ -1020,9 +1049,19 @@ async def run_query(
         )
         say("      (using locally truncated stage 1 — compressor unavailable)")
     else:
-        first = (result.stage1_error or "no response").split(".")[0][:60]
-        result.display_text = f"LLM error. {enforce_display_budget(first, max_words=18)}"
-        say("      (no LLM output available)")
+        # The lens gets a short, fixed line. The previous behaviour put the
+        # raw exception on the glasses, and a realistic 401 rendered as:
+        #
+        #     LLM error. stage 1 (m) f
+        #     ailed: Error code: 401 -
+        #     {'error': {'message':
+        #
+        # Three of five lines spent on an exception repr, broken mid-word,
+        # with the only useful part (401) buried on line two. A wearer walking
+        # and glancing gets nothing from any of it. The full diagnostic goes to
+        # the terminal, which is where a developer can act on it.
+        result.display_text = _lens_failure_line(result.stage1_error)
+        say(f"      (no LLM output available) {result.stage1_error or ''}")
 
     if not result.display_text.strip():
         result.display_text = "No response."
