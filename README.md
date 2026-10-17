@@ -2,116 +2,142 @@
 
 A custom developer backend for **Even Realities G1** smart glasses, built from
 scratch on [`bleak`](https://github.com/hbldh/bleak). Scan for the glasses,
-connect, push text onto the waveguide, and capture TouchBar packets.
+connect, render text to the waveguide, capture TouchBar packets, and run a
+two-stage LLM pipeline over a question to mirror the answer onto the lenses.
 
-Plus a **two-stage LLM pipeline** that compresses a full answer down to the
-~25 words that actually fit on the lenses.
+Plus a **policy layer** that turns every unresolved design disagreement into a
+switch with a deciding metric, rather than an argument.
 
-No vendor SDK. No app reverse-engineering dependency. Just bleak and the
-protocol.
+No vendor SDK. No reverse-engineering dependency. Just bleak, the protocol, and
+SQLite.
 
-> **Status.** Everything in this repo is verified against a real environment
-> *except* the glasses themselves — no G1 hardware was available during
-> development. The BLE code paths that need hardware (scan, connect,
-> notify, render) are unproven. See [Verification](#verification) for exactly
-> what was and was not tested.
+> **Status.** Everything here is verified against a real environment *except the
+> glasses themselves* — no G1 hardware was available during development. The
+> dev host is WSL2 with no BlueZ, so the entire BLE path is unproven on device.
+> See [What is verified](#what-is-verified-what-is-not).
+
+---
+
+## Contents
+
+- [Quick start](#quick-start)
+- [What this actually does](#what-this-actually-does)
+- [The hardware, and why it shapes everything](#the-hardware-and-why-it-shapes-everything)
+- [Using the LLM pipeline](#using-the-llm-pipeline)
+- [Providers: any local or cloud model](#providers-any-local-or-cloud-model)
+- [Policy axes: disagreements as switches](#policy-axes-disagreements-as-switches)
+- [Experiments](#experiments)
+- [Simulation](#simulation)
+- [What is verified, what is not](#what-is-verified-what-is-not)
+- [Documentation index](#documentation-index)
+- [Repository layout](#repository-layout)
 
 ---
 
 ## Quick start
 
 ```bash
-./setup.sh
-source .venv/bin/activate
-python main.py
+./setup.sh                        # venv, dependencies, Bluetooth preflight
+source .venv/bin/activate         # Windows: .venv\Scripts\activate
+
+python main.py --selftest         # 42 offline checks. No radio, no API key.
+python main.py --policy-axes      # every open design question and its deciding metric
+python main.py --scan-only        # see what advertises
+python main.py                    # interactive session
 ```
 
-Wear the glasses, make sure they are powered on and **not** bonded to the Even
-Realities mobile app, then type a question at the `g1>` prompt.
-
-Point it at a model first — local needs no API key:
+BLE-only use works with no API key and nothing installed beyond `bleak`:
 
 ```bash
-python main.py --list-providers        # what you can connect to
-python main.py --provider ollama       # local model, no key required
-python main.py --help                  # everything else
-```
-
-BLE-only use works with no API key and no LLM configured:
-
-```bash
-python main.py --one-shot --text "hello from python"   # send literal text
-python main.py --scan-only                            # see what advertises
-python main.py --verbose                              # log every BLE write
+python main.py --one-shot --text "hello from python"
+python main.py --scan-only --verbose
 ```
 
 ---
 
-## Hardware notes
-
-These are the things that will waste your time if you don't know them up front.
-
-**The G1 is two BLE peripherals, not one.** Each arm has its own radio and is
-discovered separately. They advertise as:
+## What this actually does
 
 ```
-G1_<channel>_<L|R>_<serial>      e.g.  G1_07_L_S110LAAL103842
+terminal query / TouchBar tap
+        │
+        v
+  Session.ask() / Session.more()          session.py    card stack, drill-down
+        │
+        ├─ pipeline.run_query()            pipeline.py   stage 1 reason -> stage 2 compress
+        │       │                                        + glanceability gate + repair
+        │       v
+        │   EvenG1Controller.send_text_packet()         0x4E packet -> BOTH arms
+        │       g1_driver.py     scan, connect, MTU, heartbeat, TouchBar capture
+        │
+        ├─ memory.FeedbackStore              memory.py    cards + reactions, SQLite
+        └─ policy.Policy                     policy.py    contested decisions, resolved
 ```
 
-A single connection reaches one arm only — text appears on half the waveguide.
-The driver pairs arms by channel number and writes left-then-right.
+Two LLM stages, deliberately separated:
 
-**Notifications only flow after MTU negotiation.** Left at the 23-byte minimum
-ATT MTU, the glasses stay silent and TouchBar taps never arrive. bleak handles
-this automatically on Windows and macOS; on Linux the BlueZ backend needs
-bleak's private `_acquire_mtu()`. If taps produce no output on Linux, check the
-`MTU=` value in `--verbose` output first.
-
-**The link drops after ~32 seconds without a heartbeat.** A `0x25` heartbeat
-task runs for the lifetime of the connection. This is why the interactive
-prompt is read on a worker thread: a blocking `input()` would starve the event
-loop and kill the link while you think.
-
-**Writing with the wrong mode fails.** The NUS transmit characteristic
-advertises inconsistent properties across firmware. The driver reads the
-characteristic properties and retries the other mode; `--response` forces one.
-
----
-
-## The two-stage pipeline
-
-```
-query
-  │
-  ├─[1] generate_primary_response()   heavy model, full long-form answer
-  │                                     no length constraint
-  ├─[2] condense_for_glasses()        strict HUD filter, ≤ 25 words
-  │                                     physical limits, no filler
-  └─[3] controller.send_text_packet()  0x4E packet → both arms
-```
-
-**Stage 1** does the thinking and writes a normal, complete answer. **Stage 2**
-is a structural filter, not a summariser: it is told the display's physical
-limits as hard constraints and emits only what fits.
+- **Stage 1** reasons and writes a normal, complete answer.
+- **Stage 2** is a strict structural filter that squeezes it into the **120
+  characters** the waveguide can actually show.
 
 Splitting the roles keeps reasoning quality high and makes display formatting a
-separate, cheap, easily-tuned step. Asking one model to do both tends to
-degrade the reasoning.
+separate, cheap, easily-tuned step. Asking one model to do both degrades the
+reasoning.
 
-**The word limit is enforced locally, unconditionally.** Stage 2 is instructed
-to stay within budget, but its output then passes through
-`enforce_word_budget()` anyway — a word count tied to a physical size is not
-something to take on faith from a language model. If it overruns, it is
-truncated before it ever reaches the BLE stack.
+### The display budget is in characters, not words
 
-**Failures degrade in place.** A stage-2 failure falls back to deterministic
-local truncation of stage 1; a stage-1 failure falls back to a static error
-line. The BLE write happens last, so a slow or broken API never delays the
-link, and the session survives.
+The official app lays out ~5 lines of ~24 characters, so one screen holds about
+**120 characters**. A 25-word cap is not equivalent — 25 words runs to ~199
+characters and renders as 9 lines. The ceiling is applied in code
+(`enforce_display_budget`), unconditionally, because a limit tied to physical
+dimensions is not something to take on faith from a language model.
 
 ---
 
-## Providers
+## The hardware, and why it shapes everything
+
+| Fact | Consequence |
+|---|---|
+| The G1 is **two BLE peripherals**, one per arm, named `G1_<ch>_<L\|R>_<sn>` | Text must be written to both, left then right. A single connection reaches one arm. |
+| **MTU must be negotiated** or no notifications arrive | bleak handles this on Windows/macOS; BlueZ needs the private `_acquire_mtu()`. Without it, TouchBar taps never appear. |
+| **The link drops after ~32 s without a heartbeat** | A blocking `input()` starves the event loop that runs the heartbeat, which kills the link. Terminal reads go through `asyncio.to_thread`. |
+| `0x4E` `page`/`max_page` index **screens**, not BLE fragments | Conflating them is invisible at MTU 251 and wrong at MTU 23 — a card renders as four fragment screens. |
+| `0xF5 0x04` / `0x05` are **one gesture that alternates bytes per press** | Mapping them to two actions makes the meaning flip-flop. Left deliberately unbound. |
+
+Full protocol reference: **[documents/01-hardware-facts.md](documents/01-hardware-facts.md)**
+
+---
+
+## Using the LLM pipeline
+
+```bash
+export OPENAI_API_KEY=sk-...
+
+python main.py                                  # interactive REPL
+python main.py --ask "why is onion skin layered"
+python main.py --no-text --interactive          # connect without sending anything
+```
+
+In the REPL:
+
+| command | effect |
+|---|---|
+| `<any text>` | full pipeline, mirrored to the lenses |
+| `:more` | drill down on the current card (same as a single tap) |
+| `:dismiss` | back out one level, or clear (same as a double tap) |
+| `:confirm` / `:star` | mark the current card good / important |
+| `:text <literal>` | send literal text, bypassing the LLM |
+| `:stage1 <query>` | run only stage 1 and print the full answer |
+| `:stats` / `:prefs` / `:config` / `:battery` | session, learning, config, power |
+| `:quit` | disconnect |
+
+**Failures never drop the Bluetooth session.** A stage-2 failure falls back to
+deterministic local truncation of stage 1; a stage-1 failure falls back to a
+static line. The BLE write happens *last*, so a slow or broken API never delays
+the link.
+
+---
+
+## Providers: any local or cloud model
 
 Any server implementing `POST {base_url}/chat/completions` works. There is
 nothing vendor-specific in the code path.
@@ -120,28 +146,26 @@ nothing vendor-specific in the code path.
 python main.py --list-providers
 ```
 
-| Preset | Default endpoint | Key |
+| preset | endpoint | key |
 |---|---|---|
 | `openai` | `api.openai.com` | `OPENAI_API_KEY` |
-| `ollama` | `127.0.0.1:11434/v1` | none needed |
+| `ollama` | `127.0.0.1:11434/v1` | **none needed** |
 | `lmstudio` | `127.0.0.1:1234/v1` | none needed |
 | `llamacpp` | `127.0.0.1:8080/v1` | none needed |
 | `vllm` | `127.0.0.1:8000/v1` | none needed |
 | `openrouter` / `groq` / `together` / `deepseek` | hosted | provider-specific |
 | `custom` | whatever you set | — |
 
-Local presets deliberately ship with **no hardcoded model name**, so a fresh
-checkout works against whatever you have already pulled — the driver asks the
-server what it serves and tells you what it picked:
+Local presets ship with **no hardcoded model name**: the driver asks the server
+what it serves via `GET /v1/models` and reports what it picked, so a fresh
+checkout works against whatever you have already pulled.
 
 ```bash
 python main.py --provider ollama --list-models
-#   Models served by http://127.0.0.1:11434/v1:
-#     qwen2.5-coder:7b
-#     tev1:latest
+python main.py --provider ollama --llm-check    # probe without touching the radio
 ```
 
-For anything not listed, set the URL directly:
+Anything not listed:
 
 ```bash
 export OPENAI_BASE_URL=http://some-host:8000/v1
@@ -149,105 +173,187 @@ export OPENAI_API_KEY=anything
 export OPENAI_MODEL=<model-name>
 ```
 
-See [`.env.example`](.env.example) for every variable. **No credentials belong
-in this repo** — `.env` is gitignored.
+Configuration: **[.env.example](.env.example)** · implementation:
+**[pipeline.py](pipeline.py)**
 
 ---
 
-## Configuration
+## Policy axes: disagreements as switches
 
-| Variable | Purpose |
-|---|---|
-| `G1_PROVIDER` | Provider preset (or `--provider`) |
-| `OPENAI_BASE_URL` | Override any preset's endpoint |
-| `OPENAI_API_KEY` | Credential; ignored by local servers |
-| `G1_PRIMARY_MODEL` | Stage 1 model |
-| `G1_COMPRESSOR_MODEL` | Stage 2 model |
-| `G1_MAX_DISPLAY_WORDS` | Hard display cap (default 25) |
-| `G1_LLM_TIMEOUT` | Per-request seconds (default 30) |
-| `G1_LLM_RETRIES` | Retries on transient errors (default 2) |
+Several reviewers reached genuinely different conclusions and none had the
+hardware to settle them. Picking a side would be an argument dressed as a
+design. So every open question is a **declared axis** with its deciding metric
+named *before* the data exists.
 
-Useful flags: `--llm-check` (probe the LLM without touching the radio),
-`--list-models`, `--dump-services`, `--require-ack`, `--clear`, `--verbose`.
+> **Expand at setup, streamline at runtime.** At install the axes calibrate
+> against real measurements. At runtime one resolved `Policy` is read and the
+> hot path decides nothing.
 
-In the REPL: `:help`, `:text`, `:stage1`, `:stats`, `:battery`, `:config`,
-`:quit`.
-
----
-
-## Protocol
-
-Packets use a standard Nordic UART Service:
-
-| UUID | Role |
-|---|---|
-| `6e400001-…` | NUS service |
-| `6e400002-…` | write (host → glasses) |
-| `6e400003-…` | notify (glasses → host) |
-
-Text packets are command `0x4E` with a 9-byte header:
-
-```
-byte 0   0x4E            command
-byte 1   seq             sequence
-byte 2   total_packets
-byte 3   packet_index
-byte 4   screen_status   0x71 = new content + Text Show
-byte 5-6 char_pos        16-bit big-endian scroll position
-byte 7   page
-byte 8   max_page
-byte 9+  UTF-8 text
+```bash
+python main.py --policy-axes                    # every axis, options, deciding metric
+python main.py --policy                         # what is resolved, what is still open
+python main.py --set-policy g1_model=on         # pin one by hand; persists
 ```
 
-TouchBar events arrive as `0xF5 <sub>`. Known sub-commands are decoded in
-`TOUCH_EVENT_NAMES`; anything unmapped still prints as raw hex, which is the
-point — it's how you map the rest yourself.
+| axis | options | default | settled by |
+|---|---|---|---|
+| `examination_source` | `touchbar` / `head_up` / `both` | `touchbar` | ρ = θ/A_b ≥ 1.6 from the calibration walk |
+| `g1_model` | `on` / `off` | `off` | `queue_worth_rate` ≥ 0.5 over ≥100 review labels |
+| `interrupt_gate` | `rules` / `learned` | `rules` | ≥299 clean pushes |
+| `detail_generation` | `off` / `on` | `off` | `drill_miss_rate` ≥ 0.30 |
+| `push_enabled` | `off` / `on` | `off` | a full fortnight of tier labels |
 
-All protocol constants live at the top of `g1_driver.py`.
+**Safety property, tested:** with zero evidence every axis holds its
+conservative default. An axis cannot be switched on by opinion.
+
+`detail_generation` is already wired into the live path — with the default, a
+tap logs `drill_miss` and does not start a generation. That is the point: the
+system takes a tap it cannot yet serve, writes down that it happened, and lets
+the log decide.
+
+Design: **[policy.py](policy.py)** · tests: **[experiments/policy_axes.py](experiments/policy_axes.py)**
+
+---
+
+## Experiments
+
+Everything here is reproducible and every number is computed from a real run.
+
+```bash
+.venv/bin/python main.py --selftest            # 42 offline checks, no radio, no API key
+.venv/bin/python experiments/glance_gate.py    # glanceability gate + repair
+.venv/bin/python experiments/policy_axes.py     # every axis resolves from evidence
+
+ollaya serve                                   # required for the two below
+.venv/bin/python experiments/score_corpus.py   # winnow discrimination over 40 candidates
+.venv/bin/python experiments/report-A.py       # -> experiments/results/REPORT-A.md
+.venv/bin/python experiments/clock_feature.py  # the falsified clock hypothesis
+```
+
+### What the experiments established
+
+| finding | detail |
+|---|---|
+| The decision model **cannot be the gate** alone | noise-vs-interrupt AUC 0.958; glance-vs-interrupt **0.813** zero-shot. Best precision 0.875 at recall ≥0.50 against a 0.99 budget. |
+| Two boundaries, not one | The first is objective; the second is wearer-specific and needs labels. |
+| It is **not fooled by tone** | `!!! URGENT !!! read when convenient` → 0.70; `quick one: prod database is down` → 1.73. |
+| A clock feature **does not help** | Tested and **falsified**. Every veto variant made it worse. The errors are tier assignment, not time arithmetic. |
+| Glanceability: winnow beats a regex | 0.838 vs 0.688, paired bootstrap Δ +0.150 — but winnow verifies *concreteness*, not *glanceability*, and is blind to burial. |
+| Gaze has a **cliff** at ρ = θ/A_b ≥ 1.6 | Below it, fabricated glances *contaminate* labels rather than adding noise. |
+| Latency claims were ~5–7× optimistic | Real: **110 ms** sustained warm, 500 ms idle GPU, 3.55 s cold. |
+| `winnow` fits alone, cannot share | 5826/6141 MiB resident — 95% of VRAM. |
+| `tev1` is unusable | No chat template; rejected by the OpenAI-compatible endpoint. |
+
+Reports: **[REPORT-A.md](experiments/results/REPORT-A.md)** ·
+**[REPORT-A2-ordinal.md](experiments/results/REPORT-A2-ordinal.md)** ·
+**[clock-feature.md](experiments/results/clock-feature.md)**
 
 ---
 
-## Verification
+## Simulation
 
-**Tested and passing:**
+The relay system is downstream of events arriving, and every reviewer agreed
+nothing can be calibrated without them. `sim/` generates a plausible day of
+them so the pipeline, ledger and review loop can be exercised with no glasses
+and no calendar.
 
-- 31 offline checks via `python main.py --selftest` — packet construction,
-  UTF-8, MTU-respecting chunking, name parsing, event decoding, pipeline
-  handoff, failure containment, word-budget enforcement. No radio, no API key.
-- The real `openai` SDK against a mock OpenAI-compatible server: `OPENAI_BASE_URL`
-  routing, the two-model split, and the `max_completion_tokens` → `max_tokens`
-  legacy fallback.
-- The full pipeline against **local Ollama** on an RTX 4050: stage 1 produced
-  203 words in 8.4s, stage 2 returned in 0.8s within the word cap.
-- Keyless operation: `--provider ollama` with a completely empty environment
-  discovers its model and runs both stages.
+```bash
+.venv/bin/python -c "
+from datetime import datetime
+from sim.events import EventGenerator
+for c in EventGenerator(seed=1).day(datetime(2026,10,16), count=60):
+    print(f'{c.cls:<12} {c.line}')"
+```
 
-**Not tested:**
-
-- Everything requiring the physical glasses — scan, connect, MTU negotiation
-  in practice, notification delivery, and text rendering. No G1 was available.
-- Live cloud API calls.
-
-Treat the protocol constants as a well-sourced hypothesis, not a contract.
-They come from the [official demo app](https://github.com/even-realities/EvenDemoApp)
-and [community protocol notes](https://github.com/AGiXT/mobile/blob/main/Even%20Realities%20G1%20BLE%20Protocol.txt),
-neither of which is an Even Realities API contract.
+- **`sim/events.py`** — synthetic candidates across nine classes, with realistic
+  hour-of-day weighting. Meetings cluster in working hours, social noise in the
+  evening. ~8% of a day's events are push-eligible.
+- **`sim/ledger.py`** — the decisions ledger, applying
+  **[documents/09-schema.sql](documents/09-schema.sql) verbatim**, so the
+  proposed schema is exercised rather than merely written down.
+- **`sim/wearer.py`** — a virtual wearer, written by an independent reviewer
+  specifically to be adversarial to the design rather than confirmatory.
 
 ---
+
+## What is verified, what is not
+
+**Measured on real hardware or a real model:**
+
+- All BLE packet formats, MTU-respecting chunking, name parsing, event decoding
+  — 42 offline checks.
+- The display budget in characters, and that `page` fields index screens.
+- `winnow` latency, VRAM residency, and discrimination over a 40-item labelled
+  corpus, including the falsified clock hypothesis.
+- Glanceability discrimination against a frozen regex baseline.
+- Gait simulation: the ρ cliff and the debounce constants.
+- Walking-tier CPU cost; the absence of BlueZ on this host.
+
+**Assumed, never tested — everything about the physical glasses:**
+
+- that `0x02`/`0x03` mean head up/down at all
+- that the display is 5 lines × 24 characters
+- that MTU negotiation behaves as described
+- that text written with `0x4E` shows regardless of head angle
+- that a firmware tilt threshold θ exists as modelled
+
+**The number that gates the most is θ.** Nobody has measured it. It is a
+ten-minute no-glance walk. Until then, every claim resting on the examination
+signal is conditional — which is exactly why `examination_source` defaults to
+`touchbar`.
+
+Three earlier claims of this repo were falsified by measurement and the
+corrections are kept visible rather than quietly edited:
+[documents/README.md](documents/README.md#what-is-decided-vs-still-open)
+
+---
+
+## Documentation index
+
+| # | Document | What it is |
+|---|---|---|
+| 01 | [Hardware facts and research](documents/01-hardware-facts.md) | Verified protocol facts, measured local models, and the HCI/attention research the design leans on. |
+| 02 | [Claude: architecture critique](documents/02-claude-architecture-critique.md) | Adversarial review of the first architecture. Found four defects that were then fixed. |
+| 03 | [Design brief](documents/03-design-brief.md) | The brief given to the design panel. |
+| 04 | [Design brief: operational](documents/04-design-brief-operational.md) | Same brief plus hosting, latency and field-failure angles. |
+| 05 | [Claude: design](documents/05-claude-design.md) | Full design proposal, including a correction to the push/pull premise. |
+| 06 | [zcode: operational design](documents/06-zcode-operational-design.md) | Host reality, state machines, latency budget, field failure modes. |
+| 07 | [Panel: interaction model](documents/07-panel-interaction.md) | Push budgets, gesture vocabulary, candidate sources, what kills the product. |
+| 08 | [Panel: learning substrate](documents/08-panel-learning-substrate.md) | Two-axis signal decomposition, review loop, calibration. All SQL executed. |
+| 09 | [Proposed schema](documents/09-schema.sql) | Executable SQLite DDL for the decisions ledger. |
+| 10 | [Turn B: glanceability](documents/10-turn-B-glanceability.md) | Can a decision model verify glanceability pre-display? |
+| 11 | [Turn A: blocked attempt](documents/11-turn-A-attempt.md) | A reviewer's run that was sandboxed — kept as a record of what could not be measured. |
+| 12 | [Turn C: gait and host](documents/12-turn-C-gait-and-host.md) | Gait simulation, the ρ cliff, and the two-tier host split. |
+| 13 | [Round 2: Claude convergence](documents/13-round2-claude-convergence.md) | Final design proposal, plus the sharpest argument in the corpus. |
+| 14 | [Round 2: zcode convergence](documents/14-round2-zcode-convergence.md) | Final design proposal, partly in disagreement with 13. |
+
+The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
+section before building anything, because those questions became switches.
+
+---
+
+## Repository layout
+
+```
+main.py            CLI, session wiring, REPL, offline self-test
+g1_driver.py       BLE protocol: arm pairing, 0x4E packets, heartbeat, MTU, TouchBar
+pipeline.py        LLM stages, provider presets, glanceability gate, repair
+session.py         card lifecycle, drill-down, reaction recording
+memory.py          local feedback store (cards, reactions, topic weights)
+policy.py          contested decisions as axes with deciding metrics
+plugins.py         extension seam: role overrides, entry-point discovery
+sim/               synthetic event source, decisions ledger, virtual wearer
+experiments/       reproducible measurements against local models
+documents/         design history, including the wrong turns
+DESIGN.md          the synthesised design
+```
+
+`g1_driver.py` imports on its own and has no LLM dependency. `pipeline.py` has
+no BLE dependency. The split is deliberate: each half is testable without the
+other.
 
 ## Requirements
 
-- Python ≥ 3.9
-- `bleak` (BLE), `openai` (LLM, optional — BLE half works without it)
-- Linux: BlueZ, and your user in the `bluetooth` group
-  (`sudo usermod -aG bluetooth $USER`, then log out and back in)
-
-## Layout
-
-```
-main.py        CLI, two-stage LLM pipeline, REPL
-g1_driver.py   BLE protocol, arm pairing, packet builders, heartbeat
-setup.sh       venv + dependency + adapter preflight
-```
-
-`g1_driver.py` is importable on its own and has no LLM dependency.
+Python ≥3.9, `bleak` for BLE, `openai` for the LLM pipeline (optional — the BLE
+half runs without it). On Linux: BlueZ, and your user in the `bluetooth` group
+(`sudo usermod -aG bluetooth $USER`, then log out and back in).

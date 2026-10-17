@@ -33,8 +33,14 @@ CREATE TABLE IF NOT EXISTS decisions (
     candidate_chars  INTEGER NOT NULL DEFAULT 0,
     candidate_words  INTEGER NOT NULL DEFAULT 0,
 
-    -- what the system did, and why, frozen at that moment
-    decision         TEXT    NOT NULL CHECK (decision IN ('relay','suppress')),
+    -- What the system did, and why, frozen at that moment.
+    -- Three outcomes, not two. An earlier draft of this file allowed only
+    -- ('relay','suppress'), which predates the queue-vs-push distinction the
+    -- two convergence rounds settled on -- and the difference is the whole
+    -- product. A 'push' cost trust, a 'queue' entry cost a glance, and a
+    -- 'suppress' cost nothing at all.
+    decision         TEXT    NOT NULL CHECK (decision IN
+                         ('suppress','queue','push')),
     score            REAL    NOT NULL,
     threshold        REAL    NOT NULL,
     reason           TEXT    NOT NULL DEFAULT '',
@@ -54,8 +60,13 @@ CREATE TABLE IF NOT EXISTS decisions (
     -- "never examined" is then missing data, NOT a negative label.
     observable       INTEGER NOT NULL DEFAULT 1,
 
-    -- the explicit review label
+    -- The explicit review label. These two columns are the ONLY ground truth
+    -- the system has. 'already_knew' exists because true, urgent AND already
+    -- known is a distinct outcome from genuinely novel and urgent: the first
+    -- means the laptop already did the job, and the milestone stop criterion
+    -- hinges on telling them apart.
     label            INTEGER CHECK (label IN (0,1)),
+    already_knew     INTEGER CHECK (already_knew IN (0,1)),
     reviewed_at      REAL
 );
 
