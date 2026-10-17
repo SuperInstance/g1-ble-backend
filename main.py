@@ -518,6 +518,35 @@ async def run(args: argparse.Namespace) -> int:
             print("  no TTL set -- these persist until changed by hand. Pass "
                   "--override-ttl-hours if this is a test pin.")
 
+    # `is not None`, NOT truthiness. With nargs="*", argparse yields an EMPTY
+    # LIST when the flag is passed with no arguments -- which is exactly the
+    # documented "clear everything" case, and `if args.clear_policy:` skips
+    # it. That is the worst possible failure here: the command prints nothing,
+    # clears nothing, exits 0, and the operator concludes the pins are gone.
+    if args.clear_policy is not None:
+        from policy import clear_overrides
+
+        try:
+            path, removed = clear_overrides(args.clear_policy)
+        except FileNotFoundError as exc:
+            print(str(exc))
+            return 2
+        except ValueError as exc:
+            print(f"invalid: {exc}", file=sys.stderr)
+            return 2
+        if removed:
+            print(f"cleared {len(removed)} override(s) from {path}: "
+                  f"{', '.join(removed)}")
+            print("  those axes now resolve from EVIDENCE again, which means "
+                  "the conservative default until something settles them.")
+        else:
+            print(f"nothing to clear in {path} "
+                  f"(asked for: {', '.join(args.clear_policy) or 'all'})")
+        # Terminal, unlike --set-policy: unpinning something is a complete
+        # action. Falling through would drop the operator into a 12s BLE scan
+        # on a machine with no radio, which is a confusing way to say "done".
+        return 0
+
     if args.weights:
         from memory import MIN_CARDS_FOR_INTEREST, FeedbackStore
 
@@ -1207,6 +1236,13 @@ def build_parser() -> argparse.ArgumentParser:
              "it is reported as unresolved and `settled_by_evidence()` is "
              "false for it, so anything irreversible can refuse one. Pair "
              "with --override-ttl-hours so a test pin cannot outlive the test.",
+    )
+    parser.add_argument(
+        "--clear-policy", metavar="AXIS", nargs="*", default=None,
+        help="remove a manual pin set by --set-policy, so the axis resolves "
+             "from evidence again. With no AXIS, clears every override. "
+             "Without this a pin was permanent and the only way to undo one "
+             "was editing policy.json by hand.",
     )
     parser.add_argument(
         "--override-ttl-hours", type=float, default=0.0, metavar="H",

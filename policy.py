@@ -482,6 +482,65 @@ def save_overrides(overrides: dict[str, str], ttl_s: Optional[float] = None) -> 
     return path
 
 
+def clear_overrides(axis_ids: Optional[list[str]] = None) -> tuple[Path, list[str]]:
+    """
+    Remove manual overrides, and return what was actually removed.
+
+    This exists because `save_overrides` had a matching hole: an axis could be
+    pinned forever and there was no way to unpin it from the CLI. The TTL was
+    the mitigation, but it is opt-in, so the default pin is permanent. Editing
+    a JSON file by hand is not an acceptable answer to "turn that off" -- and
+    the failure direction is bad, because a forgotten pin is exactly the
+    accident `save_overrides`'s docstring warns about, except now the operator
+    has no in-band way to undo it.
+
+    Unknown axis ids are REFUSED rather than ignored. Silently accepting
+    `g2_model=off` because the axis does not exist would report success for a
+    pin that was never removed.
+
+    `set_at`/`ttl_s` are kept only for overrides that survive, so a partial
+    clear cannot leave a TTL that governs nothing.
+    """
+    path = policy_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no policy file at {path}; nothing is overridden")
+
+    for axis_id in axis_ids or ():
+        if axis_id not in AXES_BY_ID:
+            raise ValueError(f"unknown axis {axis_id!r}")
+
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"could not read {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} is not a policy file")
+
+    overrides = raw.get("overrides", {})
+    if not isinstance(overrides, dict):
+        raise ValueError(f"{path} has a malformed 'overrides' section")
+
+    if axis_ids:
+        removed = [a for a in axis_ids if a in overrides]
+        keep = {k: v for k, v in overrides.items() if k not in axis_ids}
+    else:
+        removed = sorted(overrides)
+        keep = {}
+
+    payload: dict = {"overrides": keep}
+    # Carry the expiry across only if something is left to expire.
+    set_at = raw.get("set_at", {})
+    ttl_s = raw.get("ttl_s")
+    if keep and isinstance(set_at, dict) and ttl_s:
+        payload["set_at"] = {k: set_at[k] for k in keep if k in set_at}
+        payload["ttl_s"] = ttl_s
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2))
+    return path, removed
+
+
 def describe_axes() -> str:
     """Human-readable list of every open question and what settles it."""
     lines = ["Policy axes — every disagreement is a switch, not a verdict.", ""]

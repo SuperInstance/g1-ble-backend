@@ -5,6 +5,7 @@ Every contested decision resolves from evidence, never from opinion.
 Also proves the safety property that matters: with NO evidence at all, every
 axis lands on its conservative default.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -124,6 +125,85 @@ def main() -> int:
             ok = alive == "on" and lapsed == "off"
             fails += not ok
             print(f"  TTL expires unattended: {alive!r} -> {lapsed!r} "
+                  f"{'ok' if ok else 'FAIL'}")
+        finally:
+            policy.policy_path = orig
+
+    # A TTL is the mitigation, not the fix. It is opt-in, so the DEFAULT pin is
+    # permanent -- and there was no way to unpin from the CLI at all, only by
+    # editing policy.json by hand. I hit exactly this while testing: pinning
+    # push_enabled to reproduce a queue bug, then having to hand-edit the file
+    # to get back to a conservative posture.
+    with tempfile.TemporaryDirectory() as tmp:
+        orig = policy.policy_path
+        policy.policy_path = lambda: Path(tmp) / "policy.json"
+        try:
+            policy.save_overrides({"push_enabled": "on", "g1_model": "on"},
+                                  ttl_s=60.0)
+            path, removed = policy.clear_overrides(["g1_model"])
+            left = policy.load()
+            ok = (removed == ["g1_model"] and left.get("g1_model") == "off"
+                  and left.get("push_enabled") == "on")
+            fails += not ok
+            print(f"  clearing one axis leaves the other: g1_model -> "
+                  f"{left.get('g1_model')!r}, push_enabled stays "
+                  f"{left.get('push_enabled')!r} {'ok' if ok else 'FAIL'}")
+
+            # A TTL that survives must still govern something. Carrying
+            # set_at/ttl_s across a clear that removed its only override
+            # leaves an expiry with nothing to expire.
+            raw = json.loads(path.read_text())
+            ok = "set_at" in raw and raw.get("ttl_s") == 60.0
+            fails += not ok
+            print(f"  a partial clear keeps the TTL for what survives "
+                  f"{'ok' if ok else 'FAIL'}")
+
+            # g1_model was already removed by the partial clear above, so
+            # "what was removed" is just what was still pinned. Asserting the
+            # full list here would be asserting a duplicate.
+            path, removed = policy.clear_overrides()
+            raw = json.loads(path.read_text())
+            ok = (removed == ["push_enabled"]
+                  and raw["overrides"] == {}
+                  and "set_at" not in raw and "ttl_s" not in raw)
+            fails += not ok
+            print(f"  clearing all drops the now-meaningless TTL too "
+                  f"{'ok' if ok else 'FAIL'}")
+
+            # An unknown axis must be REFUSED, not silently ignored: reporting
+            # success for a pin that was never removed is the same lie as
+            # "cleared nothing" while looking like it worked.
+            try:
+                policy.clear_overrides(["g2_model"])
+                refused = False
+            except ValueError:
+                refused = True
+            fails += not refused
+            print(f"  an unknown axis is refused, not ignored "
+                  f"{'ok' if refused else 'FAIL'}")
+
+            # An existing-but-empty policy file is a legitimate no-op: the
+            # operator asked to clear, there was nothing, and the command says
+            # so rather than raising. Only a genuinely ABSENT file is an
+            # error, because that means there is no policy file to speak of.
+            _, removed_again = policy.clear_overrides()
+            ok = removed_again == []
+            fails += not ok
+            print(f"  clearing an empty policy is a clean no-op "
+                  f"{'ok' if ok else 'FAIL'}")
+
+            path.unlink()
+            try:
+                policy.clear_overrides()
+                absent_ok = False
+            except FileNotFoundError:
+                absent_ok = True
+            fails += not absent_ok
+            print(f"  a missing policy file says so rather than creating one "
+                  f"{'ok' if absent_ok else 'FAIL'}")
+            ok = not path.exists()
+            fails += not ok
+            print(f"  ...and does not silently create it "
                   f"{'ok' if ok else 'FAIL'}")
         finally:
             policy.policy_path = orig
