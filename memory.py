@@ -36,14 +36,22 @@ import json
 import math
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
 # Signal weights. Positive means "relay more of this", negative means "less".
+#
+# ``expand`` appears here as topic interest AND is re-read by needs_detail()
+# as detail appetite. Those are contradictory readings of one tap and summing
+# both is a double count (documents/08 §5). Expand is kept at a reduced 0.25
+# here: the wearer asking for more says the *subject* matters, but weakly --
+# it just as often means the summary was thin, which is a detail-generation
+# signal, not a relevance signal.
 EVENT_WEIGHTS: dict[str, float] = {
-    "expand": 0.5,    # asked for more detail -> topic matters, summary too thin
+    "expand": 0.25,   # asked for more detail -> topic matters somewhat
     "confirm": 0.4,   # accepted as sufficient -> the framing worked
     "star": 1.0,      # explicitly marked important
     "dismiss": -0.6,  # pushed away -> low interest
@@ -69,6 +77,34 @@ HALF_LIFE_DAYS = 7.0
 MIN_WEIGHT = 0.0
 MAX_WEIGHT = 3.0
 
+# The weight a term carries before any reaction at all. It is deliberately
+# NOT the same as "no interest": a term nobody has ever reacted to sits here,
+# and so does a term whose evidence decayed to nothing, and the two are only
+# told apart by the cards/events counts that travel with the weight.
+NEUTRAL = 1.0
+
+# A topic needs this many DISTINCT cards before it may be described as an
+# interest. Measured on the old scorer, four taps on one card pinned the
+# weight at MAX_WEIGHT and six unrelated topics tied at 3.0, so the ordering
+# fell through to the alphabetical tie-break -- a confident-looking ranking
+# built from a single card. Counting cards rather than taps is what makes
+# the number mean "this subject recurs", which is the claim being made.
+MIN_CARDS_FOR_INTEREST = 2
+
+# Interest saturates smoothly toward MAX_WEIGHT instead of being clipped at
+# it. Hard clipping was the original defect: a topic that reached the ceiling
+# stopped responding to further evidence, so a strong early signal locked in
+# permanently and tied with every other topic that also reached the ceiling.
+# The exponential is monotone and never reaches the bound, so ordering is
+# always decided by the evidence rather than by which terms saturated first.
+SATURATION_K = 0.6
+
+
+def _interest(total: float) -> float:
+    """Map an unbounded evidence total into (NEUTRAL, MAX_WEIGHT)."""
+    lift = (MAX_WEIGHT - NEUTRAL) * (1.0 - math.exp(-SATURATION_K * total))
+    return min(MAX_WEIGHT, NEUTRAL + lift)
+
 # Words carrying no signal about what a person cares about.
 STOPWORDS = frozenset("""
 a an the and or but if then than that this these those there here so as of to
@@ -89,6 +125,15 @@ much many more most other another some such only own same
 # ---------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9'\-]+")
+
+
+class StoreClosed(RuntimeError):
+    """Raised when the store is used after :meth:`FeedbackStore.close`.
+
+    Interaction logging is dispatched as fire-and-forget tasks, so a tap that
+    lands during shutdown must fail loudly and cheaply rather than raise a
+    generic "Cannot operate on a closed database" from the C module.
+    """
 
 
 def extract_keywords(text: str, *, limit: int = 12) -> list[str]:
@@ -150,6 +195,51 @@ class Interaction:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class WearerContext:
+    """
+    A snapshot of what the learning store knows, taken BEFORE the LLMs run.
+
+    Deliberately frozen and self-describing rather than a formatted string, so
+    the caller can decide what to say to the model, what to log, and what to
+    refuse to send, from the same evidence. Formatting is a policy choice and
+    belongs at the call site; measurement does not.
+    """
+
+    interests: tuple[str, ...] = ()
+    interest_detail: tuple[dict, ...] = ()
+    recent_summaries: tuple[str, ...] = ()
+    n_cards: int = 0
+    n_events: int = 0
+
+    @property
+    def has_evidence(self) -> bool:
+        return bool(self.interests)
+
+    def mentions(self, text: str) -> bool:
+        """
+        Does this text already concern something the wearer cares about?
+
+        This is the gate on personalisation. Interests are allowed to break a
+        tie between facts the answer already contains; they are never allowed
+        to pull in a fact the answer does not contain. So if the answer never
+        touches a listed topic, the whole block is withheld -- otherwise the
+        block becomes an instruction to go find that topic.
+        """
+        low = (text or "").lower()
+        return any(t in low for t in self.interests)
+
+    def describe(self) -> str:
+        """One line for the log, showing the shift rather than just the state."""
+        if not self.interests:
+            return "interests: none (no topic has evidence from 2+ cards)"
+        detail = ", ".join(
+            f"{d['topic']}({d['cards']}c/{d['events']}e, w={d['weight']:.2f})"
+            for d in self.interest_detail
+        )
+        return f"interests: {detail}"
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -169,12 +259,53 @@ class FeedbackStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(str(self.path))
-        self._conn.row_factory = sqlite3.Row
+        # Writes are dispatched off the event loop so a SQLite commit can never
+        # stall the BLE heartbeat: the G1 drops the link after ~32s idle, and a
+        # blocking commit is exactly the stall that would cause it. That means
+        # the store is touched from several worker threads, and sqlite3 has two
+        # separate hazards here that were measured, not assumed:
+        #
+        #   1. One shared connection + check_same_thread=False is worse than
+        #      the bug it hides. Measured at 8 threads x 50 writes: ~29% of
+        #      writes silently lost, and add_card() handed out 46 duplicate
+        #      card ids because cursor.lastrowid is read off a connection
+        #      another thread has already advanced. Duplicate ids put events
+        #      and drill-down parents on the wrong card.
+        #   2. A transaction opened on the shared connection is committed by
+        #      whichever unrelated thread calls commit() next, so a rolled-back
+        #      write becomes durable anyway.
+        #
+        # So: one connection PER THREAD (each thread owns its cursor, its
+        # lastrowid and its transaction), and every write serialised through
+        # one lock so commits cannot interleave. Reads take no lock -- in WAL
+        # mode concurrent readers do not block the writer.
+        self._local = threading.local()
+        self._lock = threading.RLock()
+        self._conns: list[sqlite3.Connection] = []
+        self._closed = False
         self._init_schema()
 
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """This thread's private connection, created on first use."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            if self._closed:
+                raise StoreClosed(f"{self.path} is closed")
+            conn = sqlite3.connect(
+                str(self.path), check_same_thread=False, timeout=5.0,
+            )
+            conn.row_factory = sqlite3.Row
+            # busy_timeout turns a contended write into a wait instead of an
+            # immediate "database is locked" error.
+            conn.execute("PRAGMA busy_timeout=5000;")
+            self._local.conn = conn
+            self._conns.append(conn)
+        return conn
+
     def _init_schema(self) -> None:
-        self._conn.executescript(
+        with self._lock:
+            self._conn.executescript(
             """
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS cards (
@@ -200,25 +331,40 @@ class FeedbackStore:
                 updated_at REAL NOT NULL
             );
             """
-        )
-        self._conn.commit()
+            )
+            self._conn.commit()
 
     def close(self) -> None:
-        close = getattr(self._conn, "close", None)
-        if close:
-            close()
+        """
+        Close every connection this store has opened.
+
+        Holding the write lock means a close can never interleave with an
+        in-flight commit, and flipping ``_closed`` first means a write that
+        arrives afterwards raises :class:`StoreClosed` instead of racing a
+        C-level teardown that would silently drop the interaction.
+        """
+        with self._lock:
+            self._closed = True
+            for conn in self._conns:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            self._conns.clear()
+            self._local = threading.local()
 
     # -- key/value metadata ------------------------------------------------
 
     def set_meta(self, key: str, value: str) -> None:
         """Upsert a metadata value (used for cached derived artefacts)."""
-        self._conn.execute(
-            "INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
-            "updated_at=excluded.updated_at",
-            (key, str(value), time.time()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (key, str(value), time.time()),
+            )
+            self._conn.commit()
 
     def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Read a metadata value, or ``default`` when absent."""
@@ -248,14 +394,19 @@ class FeedbackStore:
             extract_keywords(f"{query} {summary}")
         )
         now = time.time()
-        cursor = self._conn.execute(
-            "INSERT INTO cards (created_at, query, stage1, summary, keywords) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (now, query, stage1, summary, json.dumps(list(terms))),
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO cards (created_at, query, stage1, summary, keywords) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (now, query, stage1, summary, json.dumps(list(terms))),
+            )
+            self._conn.commit()
+            # Read lastrowid while still holding the lock and still on this
+            # thread's own connection: read it after the lock drops and another
+            # writer can hand this caller an id it never received.
+            card_id = int(cursor.lastrowid)
         return Card(
-            id=int(cursor.lastrowid),
+            id=card_id,
             created_at=now,
             query=query,
             stage1=stage1,
@@ -272,11 +423,12 @@ class FeedbackStore:
                 f"{sorted(OBSERVATION_KINDS)}"
             )
         now = time.time()
-        self._conn.execute(
-            "INSERT INTO events (created_at, card_id, kind, detail) VALUES (?, ?, ?, ?)",
-            (now, card_id, kind, detail),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO events (created_at, card_id, kind, detail) VALUES (?, ?, ?, ?)",
+                (now, card_id, kind, detail),
+            )
+            self._conn.commit()
         return Interaction(created_at=now, card_id=card_id, kind=kind, detail=detail)
 
     # -- reads -------------------------------------------------------------
@@ -327,50 +479,143 @@ class FeedbackStore:
 
     # -- the learning part -------------------------------------------------
 
-    def topic_weights(self, *, since_days: float = 30.0) -> dict[str, float]:
+    def topic_evidence(self, *, since_days: float = 30.0) -> dict[str, dict]:
         """
-        Weighted interest per topic keyword.
+        Per-topic interest with the evidence behind it.
+
+        Weighted interest per topic keyword, plus how many distinct cards and
+        raw events justify it.
 
         For every event, the card's keywords are credited or penalised by the
-        event's weight, then decayed by age. Repeated expansion of the same
-        subject compounds, which is how "this person cares about X" emerges
-        from a handful of interactions.
+        event's weight, then decayed by age.
+
+        Contributions are folded per CARD first -- one card contributes its own
+        strongest reaction, damped if it drew several -- and only distinct
+        cards compound. The old per-event sum made a weight a measure of taps
+        rather than of distinct subjects, and it saturated: four taps on one
+        card reached MAX_WEIGHT, six unrelated terms tied at 3.0, and the
+        ranking fell through to alphabetical order.
         """
         since = time.time() - since_days * 86400.0
         rows = self._conn.execute(
-            "SELECT e.kind AS kind, e.created_at AS created_at, c.keywords AS keywords "
+            "SELECT e.kind AS kind, e.created_at AS created_at, "
+            "       e.card_id AS card_id, c.keywords AS keywords "
             "FROM events e JOIN cards c ON c.id = e.card_id "
             "WHERE e.created_at >= ?",
             (since,),
         ).fetchall()
+        now = time.time()
 
-        weights: dict[str, float] = {}
+        # card_id -> term -> strongest single contribution from that card
+        per_card: dict[int, dict[str, float]] = {}
+        card_events: dict[int, int] = {}
         for row in rows:
             base = EVENT_WEIGHTS.get(row["kind"], 0.0)
             if base == 0.0:
                 continue
-            contribution = base * _decay(time.time() - row["created_at"])
+            card_id = int(row["card_id"])
+            card_events[card_id] = card_events.get(card_id, 0) + 1
+            contribution = base * _decay(now - row["created_at"])
             try:
                 terms = json.loads(row["keywords"])
             except (json.JSONDecodeError, TypeError):
                 continue
+            seen = per_card.setdefault(card_id, {})
             for term in terms:
-                weights[term] = _clamp(weights.get(term, 1.0) + contribution)
+                seen[term] = max(seen.get(term, contribution), contribution)
 
-        # Keywords that exist but have never been reacted to sit at neutral.
+        totals: dict[str, float] = {}
+        cards_seen: dict[str, set[int]] = {}
+        events_seen: dict[str, int] = {}
+        for card_id, terms in per_card.items():
+            n_taps = card_events.get(card_id, 1)
+            # Repetition still counts, but logarithmically: 4 taps on one card
+            # approach 2x, they never reach 4x.
+            damp = 1.0 + math.log1p(n_taps - 1)
+            for term, value in terms.items():
+                totals[term] = totals.get(term, NEUTRAL) + value * damp
+                cards_seen.setdefault(term, set()).add(card_id)
+                events_seen[term] = events_seen.get(term, 0) + n_taps
+
+        # Terms seen only on cards nobody reacted to carry no signal at all. They
+        # are listed so a caller can tell them apart from real evidence, and
+        # they are given NEUTRAL directly rather than a total of 0.0 -- a zero
+        # total run through the saturation curve lands at NEUTRAL+0.45, which
+        # would let a term nobody ever reacted to outrank a genuine signal.
+        silent: set[str] = set()
         for card in self.recent_cards(limit=200, since=since):
             for term in card.keywords:
-                weights.setdefault(term, 1.0)
+                if term not in totals:
+                    silent.add(term)
 
-        return weights
+        out = {
+            term: {
+                "weight": _interest(total),
+                "cards": len(cards_seen.get(term, ())),
+                "events": events_seen.get(term, 0),
+            }
+            for term, total in totals.items()
+        }
+        for term in silent:
+            out.setdefault(term, {
+                "weight": NEUTRAL, "cards": 0, "events": 0,
+            })
+        return out
 
     def top_topics(self, *, limit: int = 8, since_days: float = 30.0) -> list[tuple[str, float]]:
-        """Most-weighted topics first."""
+        """Most-weighted topics first. Includes unevidenced terms at neutral."""
         weights = self.topic_weights(since_days=since_days)
         ranked = sorted(weights.items(), key=lambda kv: (-kv[1], kv[0]))
         return ranked[:limit]
 
-    def needs_detail(self, *, since_days: float = 30.0) -> list[str]:
+    def interests(
+        self, *, limit: int = 3, since_days: float = 30.0,
+        min_cards: int = MIN_CARDS_FOR_INTEREST,
+    ) -> list[dict]:
+        """
+        Topics with enough *distinct-card* evidence to call an interest.
+
+        This is the only accessor meant for prompt injection. It refuses to
+        name a topic seen on fewer than ``min_cards`` cards, because a topic
+        backed by one card is a fact about one card, not about the wearer.
+
+        Sorted by evidence first (cards, then weight), so the strongest
+        recurring subject leads and the tie-break is no longer alphabetical
+        among equal weights.
+        """
+        ev = self.topic_evidence(since_days=since_days)
+        candidates = [
+            {"topic": t, **info}
+            for t, info in ev.items()
+            if info["cards"] >= min_cards and info["weight"] > NEUTRAL + 0.05
+        ]
+        candidates.sort(key=lambda c: (-c["cards"], -c["weight"], c["topic"]))
+        return candidates[:limit]
+
+    def wearer_context(
+        self, *, limit: int = 3, recent: int = 5,
+        since_days: float = 30.0,
+    ) -> WearerContext:
+        """
+        Snapshot interests + recent card state for one query.
+
+        Read off the event loop by the caller (it scans the event history), so
+        it is a pure read: it writes nothing and takes no lock.
+        """
+        detail = tuple(self.interests(limit=limit, since_days=since_days))
+        counts = self.counts()
+        return WearerContext(
+            interests=tuple(d["topic"] for d in detail),
+            interest_detail=detail,
+            recent_summaries=tuple(
+                c.summary for c in self.recent_cards(limit=recent)
+            ),
+            n_cards=counts.get("cards", 0),
+            n_events=counts.get("events", 0),
+        )
+
+    def needs_detail(self, *, since_days: float = 30.0,
+                     min_cards: int = MIN_CARDS_FOR_INTEREST) -> list[str]:
         """
         Topics this wearer kept drilling into.
 
@@ -378,11 +623,16 @@ class FeedbackStore:
         that get expanded far more often than dismissed are the ones where the
         compressor should spend its word budget on specifics rather than a
         summary line.
+
+        Now evidence-gated on distinct cards too. Before, one expand tap was
+        enough to clear the >0.5 bar, so a single card could dictate the
+        compressor's style.
         """
         since = time.time() - since_days * 86400.0
         tally: dict[str, float] = {}
+        cards_seen: dict[str, set[int]] = {}
         rows = self._conn.execute(
-            "SELECT e.kind AS kind, c.keywords AS keywords "
+            "SELECT e.kind AS kind, e.card_id AS card_id, c.keywords AS keywords "
             "FROM events e JOIN cards c ON c.id = e.card_id "
             "WHERE e.created_at >= ?",
             (since,),
@@ -396,30 +646,49 @@ class FeedbackStore:
             except (json.JSONDecodeError, TypeError):
                 continue
             for term in terms:
-                tally[term] = _clamp(tally.get(term, 0.0) + delta)
+                tally[term] = tally.get(term, 0.0) + delta
+                if delta > 0:
+                    cards_seen.setdefault(term, set()).add(int(row["card_id"]))
         ranked = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
-        return [term for term, score in ranked if score > 0.5]
+        return [
+            term for term, score in ranked
+            if score > 0.5 and len(cards_seen.get(term, ())) >= min_cards
+        ]
 
-    def preferences(self, *, limit: int = 8, since_days: float = 30.0) -> str:
+    def preferences(self, *, limit: int = 3, since_days: float = 30.0) -> str:
         """
         Compact preference block for injection into the stage-2 prompt.
 
-        Returns an empty string when there is not enough history to say
-        anything useful, so the prompt is unchanged for a new user.
+        Returns an empty string unless there is real evidence, so the prompt is
+        byte-identical for a new user and for a wearer whose evidence is too
+        thin to support a claim. The two independent reasons it returns "":
+
+          * fewer than MIN_CARDS_FOR_INTEREST distinct cards support any topic;
+          * no topic clears NEUTRAL + 0.05.
+
+        Topic names only -- no weights, no counts. A number in a prompt reads
+        as a command ("prioritise 2.8x"), not as a mild prior, and three names
+        read as "these matter" where eight read as "everything matters equally",
+        which is the over-serving the design is trying to avoid.
         """
         counts = self.counts()
-        if counts.get("events", 0) < 3:
+        # Reactions only. `counts["events"]` includes OBSERVATION_KINDS, which
+        # carry no topic weight by design -- three `repaired` or `shown` rows
+        # would otherwise unlock a personalisation block while saying nothing
+        # about what this wearer cares about.
+        reactions = sum(counts.get(k, 0) for k in EVENT_WEIGHTS)
+        if reactions < 3:
             return ""
 
-        top = self.top_topics(limit=limit, since_days=since_days)
-        interesting = [(t, w) for t, w in top if w > 1.05]
+        interesting = [c["topic"] for c in self.interests(limit=limit,
+                                                         since_days=since_days)]
         detail = self.needs_detail(since_days=since_days)
 
         lines: list[str] = []
         if interesting:
             lines.append(
                 "This wearer engages most with: "
-                + ", ".join(topic for topic, _ in interesting[:limit])
+                + ", ".join(interesting[:limit])
                 + ". Weight those subjects when choosing what to relay."
             )
         if detail:

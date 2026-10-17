@@ -448,6 +448,37 @@ async def run(args: argparse.Namespace) -> int:
             return 2
         print(f"saved overrides -> {path}")
 
+    if args.weights:
+        from memory import MIN_CARDS_FOR_INTEREST, NEUTRAL, FeedbackStore
+
+        store = FeedbackStore(args.store)
+        ctx = store.wearer_context()
+        counts = store.counts()
+        print(f"Learned topic weights  ({store.path})\n")
+        print(f"  {counts.get('cards', 0)} cards, {counts.get('events', 0)} "
+              f"events; a topic needs {MIN_CARDS_FOR_INTEREST} distinct cards "
+              f"before it counts as an interest")
+        if not counts.get("events"):
+            print("\n  no reactions yet -- the stage-2 prompt is unmodified")
+
+        ev = store.topic_evidence()
+        shown = sorted(ev.items(), key=lambda kv: (-kv[1]["cards"],
+                                                   -kv[1]["weight"], kv[0]))
+        print()
+        for term, info in shown[:25]:
+            gate = "" if info["cards"] >= MIN_CARDS_FOR_INTEREST else "  (below gate)"
+            print(f"  {term:<18} w={info['weight']:5.2f}  "
+                  f"cards={info['cards']}  events={info['events']}{gate}")
+
+        if ctx.has_evidence:
+            print(f"\n  stage-2 prompt receives: {', '.join(ctx.interests)}")
+        else:
+            print("\n  stage-2 prompt receives: nothing (no evidenced interest)")
+        if ctx.recent_summaries:
+            print(f"  recent cards on the lenses: {len(ctx.recent_summaries)}")
+        store.close()
+        return 0
+
     if args.policy:
         from policy import load as load_policy
 
@@ -719,6 +750,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", metavar="PATH",
         help="feedback database path "
              "(default: ~/.local/share/g1-ble-backend/feedback.db)",
+    )
+    parser.add_argument(
+        "--weights", action="store_true",
+        help="show learned topic weights and the evidence behind them, and "
+             "exit. This is the same evidence the stage-2 prompt is built "
+             "from, so it shows exactly what personalisation is acting on.",
     )
     parser.add_argument(
         "--policy", action="store_true",

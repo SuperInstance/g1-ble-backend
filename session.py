@@ -184,10 +184,10 @@ class Session:
         prefs = self.preferences()
         result = await run_query(
             query, self.send, client=client, config=self.config,
-            preferences=prefs, mode="primary",
+            preferences=prefs, mode="primary", store=self.store,
         )
 
-        keywords = extract_keywords(f"{query} {result.stage1 or ''}")
+        keywords = extract_keywords(f"{query} {result.display_text}")
         card = self.store.add_card(
             query=query,
             stage1=result.stage1 or "",
@@ -199,6 +199,40 @@ class Session:
         # A new question replaces the thread rather than stacking under it.
         self.stack = [displayed]
         return displayed
+
+    async def _record(self, card_id: int, kind: str, detail: str = "") -> bool:
+        """
+        Write one wearer reaction to the ledger, off the event loop.
+
+        Every reaction goes through here. ``handle_touch`` is entered from the
+        bleak notification callback and ``run_action`` from a task on the same
+        loop that carries the BLE heartbeat, so a SQLite commit made inline
+        would block the heartbeat for exactly as long as the commit takes --
+        and the G1 drops the link after ~32s without one. ``asyncio.to_thread``
+        moves the commit to the default executor; ``FeedbackStore`` serialises
+        the write behind its own lock, so the heartbeat never waits on it.
+
+        The await is kept deliberately: fire-and-forget would let the stats
+        counters drift away from what is actually persisted, and a failed write
+        would be invisible. Returns whether the row landed.
+        """
+        try:
+            await asyncio.to_thread(self.store.add_event, card_id, kind, detail)
+        except Exception as exc:                        # noqa: BLE001
+            log.warning("could not record %r on card %s: %s", kind, card_id, exc)
+            return False
+
+        log.info("recorded %-7s card=%s", kind, card_id)
+        # Show the shift, not just the event: the whole point of the ledger is
+        # watching interests move. Only for the two reactions that actually
+        # move them -- on every tap this is a full history scan for no news.
+        if kind in ("star", "dismiss"):
+            try:
+                ctx = await asyncio.to_thread(self.store.wearer_context)
+                log.info("weights -> %s", ctx.describe())
+            except Exception as exc:                    # noqa: BLE001
+                log.warning("could not read weights: %s", exc)
+        return True
 
     async def more(self) -> Optional[Displayed]:
         """
@@ -219,7 +253,7 @@ class Session:
         # decides, not an opinion; until drill_miss_rate is measured, tap does
         # not spin up a generation.
         if not self.policy.on("detail_generation"):
-            self.store.add_event(top.card.id, "drill_miss", "deferred-by-policy")
+            await self._record(top.card.id, "drill_miss", "deferred-by-policy")
             log.info("drill-down deferred: policy detail_generation=off "
                      "(drill_miss recorded; the log decides)")
             return top
@@ -232,12 +266,13 @@ class Session:
         result = await run_query(
             top.card.query, self.send, client=client, config=self.config,
             preferences=self.preferences(), mode="followup", context=context,
+            store=self.store,
         )
 
         # Recording the reaction and creating the child card are one action.
-        self.store.add_event(top.card.id, "expand", "touchbar/tap")
+        await self._record(top.card.id, "expand", "touchbar/tap")
 
-        keywords = extract_keywords(f"{top.card.query} {result.stage1 or ''}")
+        keywords = extract_keywords(f"{top.card.query} {result.display_text}")
         card = self.store.add_card(
             query=top.card.query,
             stage1=result.stage1 or "",
@@ -274,7 +309,7 @@ class Session:
             return self.stack[-1]
 
         # Root card dismissed: the wearer declined to engage with this at all.
-        self.store.add_event(top.card.id, "dismiss", "root-dismissed")
+        await self._record(top.card.id, "dismiss", "root-dismissed")
         self.stack.pop()
         with_content = top.card.summary
         if with_content:
@@ -289,7 +324,7 @@ class Session:
         top = self.current
         if top is None:
             return False
-        self.store.add_event(top.card.id, "confirm", "touchbar/triple-tap")
+        await self._record(top.card.id, "confirm", "touchbar/triple-tap")
         self.stats.confirms += 1
         return True
 
@@ -298,7 +333,7 @@ class Session:
         top = self.current
         if top is None:
             return False
-        self.store.add_event(top.card.id, "star", "touchbar/triple-tap-alt")
+        await self._record(top.card.id, "star", "touchbar/triple-tap-alt")
         self.stats.stars += 1
         return True
 

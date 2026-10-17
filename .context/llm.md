@@ -49,7 +49,7 @@ come from reading the code; re-check them with the commands below.
 | a clock/deadline feature improves precision | **falsified** (+0.000; veto variants worse) | REPORT-A2 |
 | the SHIPPED `check_glanceable` performs like 0.688 | **assumed**: it adds referent, hedge and lead≥6 rules (:609-626) never measured | pipeline.py:589 |
 | the fact must sit in the first ~48 chars to be glanceable | **assumed** | Turn B §1 |
-| injecting `preferences()` improves summaries | **assumed**, no experiment | memory.py:403 |
+| injecting `preferences()` improves summaries | **still assumed**. The substrate under it is now measured (`experiments/learning_substrate.py`) and the injection path is gated + falsifiable (`personalise=False`); the A/B itself is still unrun | memory.py:interests() |
 | EVENT_WEIGHTS, HALF_LIFE_DAYS=7, GLANCEABILITY_MIN=0.5 | **assumed**, untuned | memory.py:45,66; pipeline.py:586 |
 
 ### Open
@@ -100,5 +100,11 @@ its 11 cases were written by the code's author.
   the 48-char premise falls, and `repair_buried_fact` with it.
 - After N wearer labels, glance/interrupt precision stays at the zero-shot
   level. Then personal calibration is not the fix for REPORT-A2's split gate.
-- An A/B with `preferences=""` shows the same expand/dismiss rates. Then the
-  memory.py injection is decoration.
+- An A/B with `personalise=False` shows the same expand/dismiss rates. Then the
+  memory.py injection is decoration. **Runnable today** — the flag is wired
+  through `run_query`/`condense_for_glasses`, so this A/B no longer needs a
+  code change, only a run with real wearer labels.
+- Interest matching wins ties rather than leading. Stage 2 cannot log which
+  fact it chose, so compliance with rules 8-12 is **unobservable**. Anti-echo
+  (`already_knew=1`) can only be measured upstream; if it must live upstream,
+  interests should live there too.

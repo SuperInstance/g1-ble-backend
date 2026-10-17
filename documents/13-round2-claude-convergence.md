@@ -59,16 +59,24 @@ Before day 0: a 10-minute walk without looking up, then set `dwell = max(500, 1.
 Review keys: `y` (worth it), `n` (shouldn't have fired), `k` (worth it, but I already knew). `k` needs one new column, `already_knew`.
 
 ```sql
-SELECT COUNT(*) pushes,
+SELECT COUNT(*) shown,
        SUM(label=1 AND already_knew=0) earned,
-       SUM(label=0 AND already_knew=0) false_push,
+       SUM(label=0 AND already_knew=0) false_alarm,
        SUM(already_knew=1) redundant,
        SUM(label IS NULL) unreviewed
 FROM decisions
-WHERE decision='relay' AND created_at BETWEEN :t0 AND :t0+14*86400;
+WHERE decision='queue' AND created_at BETWEEN :t0 AND :t0+14*86400;
 ```
 
-- **Continue if** `earned ≥ 15`, `false_push ≤ 1`, `redundant < earned`, `unreviewed = 0`, and the glasses were worn 4 h or more on at least 10 days.
+*Corrected 2026-10-16.* This query read `decision='relay'` and counted the
+column `pushes`. `'relay'` is **not** in the schema's
+`CHECK (decision IN ('suppress','queue','push'))`, so the query matched no rows
+and reported a clean day-14 every time. Day 1–14 is queue-only by design, so
+the milestone must count `queue`: `push` rows do not exist yet, and leaving the
+filter off entirely (as `DESIGN.md` did) sweeps in `suppress` rows the wearer
+never saw. Both documents now read identically.
+
+- **Continue if** `earned ≥ 15`, `false_alarm ≤ 1`, `redundant < earned`, `unreviewed = 0`, and the glasses were worn 4 h or more on at least 10 days.
 - **Stop if** they were worn on fewer days than that, or if `redundant ≥ earned` (the laptop already does the job).
 
 ## 6. Disagreements

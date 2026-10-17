@@ -86,6 +86,7 @@ class DayResult:
     re_examined: int = 0
     drill_miss: int = 0
     reviewed: int = 0
+    urgent: int = 0
     earned: int = 0
     rejected: int = 0
     already_knew: int = 0
@@ -205,10 +206,18 @@ def run_arm(arm: str, days: int, seed: int) -> tuple[list[DayResult], Ledger]:
                 line = render_queue_line(cand)
                 worth = wearer.glance_worth(cand.as_spool_json(), line)
                 known = wearer.responds(cand.as_spool_json())
-                ledger.label(did, worth, already_knew=int(known.get("already_knew", 0)))
+                ledger.label(did, 1 if worth >= 1 else 0,
+                             already_knew=int(known.get("already_knew", 0)))
                 ledger.apply_label_counts(did)
                 res.reviewed += 1
-                if worth == 1 and not known.get("already_knew"):
+                # glance_worth is ordinal (0 ignorable / 1 glance / 2 read
+                # now) but decisions.label is the binary ground truth the
+                # schema constrains to IN (0,1) and that apply_label_counts
+                # folds into the Beta counts as pos/neg. Worthy-at-all is the
+                # bit that matters there; urgency is a separate axis below.
+                if worth == 2:
+                    res.urgent += 1
+                if worth >= 1 and not known.get("already_knew"):
                     res.earned += 1
                 elif worth == 0:
                     res.rejected += 1
@@ -238,6 +247,7 @@ def report(arm: str, results: list[DayResult], ledger: Ledger) -> dict:
         "re_examined": t("re_examined"),
         "reviewed": t("reviewed"),
         "earned": t("earned"),
+        "urgent": t("urgent"),
         "rejected": t("rejected"),
         "already_knew": t("already_knew"),
         "queue_worth_rate": round(t("earned") / tot_q, 4) if tot_q else None,

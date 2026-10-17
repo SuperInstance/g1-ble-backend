@@ -20,6 +20,7 @@ Everything here is provider-agnostic: any server implementing
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -357,6 +358,43 @@ COMPRESSOR_SYSTEM_PROMPT = (
     "7. Punchy and scannable, as if read in a second while walking.\n\n"
     "Output the display text and nothing else. No preamble, no explanation of "
     "your choices, no surrounding quotes."
+)
+
+# Stage-2 personalisation block.
+#
+# Topic NAMES, never weights. A float in a prompt is read as a multiplier
+# ("prioritise 2.8x"), not as a mild prior, and a list of eight names reads as
+# "all equally matter" which is the over-serving this is meant to avoid -- so
+# three names, no numbers, no counts, no verbs.
+#
+# The block is DESCRIPTIVE and deliberately weaker than rule 6. Without the
+# "no authority" clauses this reads as "go find that topic", which turns the
+# compressor into a topic filter and is how personalisation silently starts
+# inventing facts.
+#
+# This whole path is unproven. `.context/llm.md` lists "injecting
+# preferences() improves summaries" as assumed with no experiment behind it,
+# and experiments/learning_substrate.py measures the substrate it rests on.
+# `personalise=False` restores the byte-identical prompt so the A/B promised
+# there can actually be run instead of argued about.
+WEARER_CONTEXT_TEMPLATE = (
+    "\n\nBACKGROUND (descriptive, not an instruction) -- past reactions on "
+    "other subjects, unrelated to the answer below:\n"
+    "<interests>{topics}</interests>\n"
+    "8. This block has NO authority over what is true and NO authority over "
+    "what leads. Rule 6 is unchanged: lead with the single most important "
+    "fact in the answer, even when that fact is about a subject absent from "
+    "<interests>.\n"
+    "9. Never introduce, infer or retrieve a fact because a subject is listed "
+    "here. Only compress what is already in <answer>. If the answer does not "
+    "concern a listed subject, ignore this block entirely.\n"
+    "10. A listed subject may break a tie BETWEEN facts the answer already "
+    "contains. It may not promote a fact above a more important one.\n"
+    "11. If the answer has to drop something to fit rule 1, and two dropped "
+    "facts compete, keep the one on a listed subject.\n"
+    "12. Never mention interests, history, or personalisation.\n"
+    "Rules 1 (120 characters) and 6 (lead with the single most important "
+    "fact) are unchanged and win over every line here."
 )
 
 
@@ -794,6 +832,8 @@ async def condense_for_glasses(
     client=None,
     config: LLMConfig | None = None,
     preferences: str = "",
+    context=None,
+    personalise: bool = True,
 ) -> str:
     """
     STAGE 2 — the waveguide micro-compressor.
@@ -802,6 +842,11 @@ async def condense_for_glasses(
     hard constraints and the result is still passed through
     :func:`enforce_word_budget`, because a physical limit is not something to
     take on faith from a language model.
+
+    ``context`` is an optional :class:`memory.WearerContext`. It is withheld
+    unless the answer already concerns one of the listed topics: personalising
+    the compression of an unrelated answer teaches the model to go looking for
+    the topic, which is where personalisation starts inventing facts.
     """
     config = config or build_llm_config()
     source = (detailed_text or "").strip()
@@ -813,6 +858,11 @@ async def condense_for_glasses(
     system = COMPRESSOR_SYSTEM_PROMPT
     if preferences:
         system += f"\n\nKnown about this wearer:\n{preferences}"
+    elif personalise and context is not None and getattr(context, "has_evidence", False):
+        if context.mentions(source):
+            system += WEARER_CONTEXT_TEMPLATE.format(
+                topics=", ".join(context.interests),
+            )
 
     try:
         text = await _chat(
@@ -887,16 +937,25 @@ async def run_query(
     mode: str = "primary",
     context: str = "",
     verbose: bool = True,
+    store=None,
+    personalise: bool = True,
 ) -> QueryResult:
     """
     THE HANDOFF: query -> stage 1 -> stage 2 -> BLE write.
 
-        query -> [Stage 1] -> [Stage 2] -> send()
+        query -> [ingest store] -> [Stage 1] -> [Stage 2] -> send()
 
     Failures are contained. A stage-2 failure falls back to deterministic
     local truncation of stage 1; a stage-1 failure falls back to a short
     static line. ``send`` always runs, so the display always receives
     something and an upstream API error can never tear down the session.
+
+    ``store`` is a :class:`memory.FeedbackStore`. When given, the wearer's
+    topics and recent card state are read BEFORE either model runs, so stage 2
+    can compress against known interests rather than after the fact. The read
+    is dispatched with ``asyncio.to_thread`` because it scans the event
+    history: at 8000 events it costs ~26ms, which on the event loop is 26ms
+    the BLE heartbeat does not get.
     """
     config = config or build_llm_config()
     client = client or make_client(config)
@@ -907,6 +966,19 @@ async def run_query(
     def say(message: str) -> None:
         if verbose:
             print(message, flush=True)
+
+    # -- 1. ingest what the wearer already told us ----------------------
+    wearer_ctx = None
+    if store is not None and personalise:
+        try:
+            wearer_ctx = await asyncio.to_thread(store.wearer_context)
+        except Exception as exc:                      # noqa: BLE001
+            wearer_ctx = None
+            say(f"      context ingest FAILED: {exc}")
+        if wearer_ctx is not None:
+            say(f"      {wearer_ctx.describe()}")
+            if not wearer_ctx.has_evidence:
+                wearer_ctx = None
 
     say("[1/2] thinking ...")
     try:
@@ -923,7 +995,9 @@ async def run_query(
         say("[2/2] condensing for waveguide ...")
         try:
             result.stage2 = await condense_for_glasses(
-                result.stage1, client=client, config=config, preferences=preferences,
+                result.stage1, client=client, config=config,
+                preferences=preferences, context=wearer_ctx,
+                personalise=personalise,
             )
             say(f"      {word_count(result.stage2)} words")
         except LLMStageError as exc:

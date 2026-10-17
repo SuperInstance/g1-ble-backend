@@ -217,14 +217,23 @@ class Ledger:
         return float(row["r"])
 
     def drill_miss_rate(self) -> float | None:
-        """The metric `detail_generation` turns on."""
+        """
+        The metric `detail_generation` turns on.
+
+        Numerator and denominator must describe the SAME population. The
+        denominator is drills (depth > 0); the numerator previously counted
+        every `outcome='unobservable'` row regardless of depth, so root-level
+        misses inflated the rate against a drill-only denominator and could
+        push it above 1.0.
+        """
         shown = self.conn.execute(
             "SELECT COUNT(*) n FROM decisions WHERE depth > 0").fetchone()["n"]
         if not shown:
             return None
         miss = self.conn.execute(
-            "SELECT COUNT(*) n FROM decisions WHERE outcome='unobservable'").fetchone()["n"]
-        return miss / shown if shown else None
+            "SELECT COUNT(*) n FROM decisions"
+            " WHERE depth > 0 AND outcome='unobservable'").fetchone()["n"]
+        return miss / shown
 
     def evidence(self) -> dict:
         """Everything the policy axes need, gathered in one place."""

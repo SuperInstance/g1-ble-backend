@@ -192,8 +192,17 @@ SELECT count(*)                                        AS shown,
        sum(already_knew=1)                             AS redundant,
        sum(label IS NULL)                              AS unreviewed
   FROM decisions
- WHERE created_at BETWEEN :t0 AND :t0 + 14*86400;
+ WHERE decision='queue' AND created_at BETWEEN :t0 AND :t0 + 14*86400;
 ```
+
+The `decision='queue'` filter is load-bearing. Without it `shown` counts
+`suppress` rows too — items the wearer never saw — and `earned` becomes a
+fraction of the wrong denominator, so the milestone can be failed by things
+that were correctly never shown. Day 1–14 is queue-only by design, so `push`
+rows do not exist yet and filtering to `push` would return nothing.
+`documents/13` previously read `decision='relay'`, which is not a member of the
+`CHECK (decision IN ('suppress','queue','push'))` constraint and returned an
+empty result.
 
 **Continue if** earned ≥15, false_alarm ≤1, redundant < earned, unreviewed = 0,
 and the glasses were worn ≥4h on at least 10 of 14 days.

@@ -137,10 +137,11 @@ class VirtualWearer:
         self._topic_hist: dict[str, dict] = {}      # topic -> seen/expands/last
         self._lens: dict[str, dict] = {}            # display_text -> legible/value
         self._observed: set = set()            # (ts, line) pairs already counted
+        self._interrupted: set = set()        # (ts, line) pairs that pushed
 
         # ---- counters for report() ----------------------------------------
         self._n_seen = self._n_shown = self._n_interrupts = 0
-        self._n_bad = self._n_redundant = 0
+        self._n_bad = self._n_redundant = self._n_ignored = 0
         self._n_examined = self._n_reexamined = self._n_unreadable_reeads = 0
         self._headups = 0
 
@@ -419,6 +420,11 @@ class VirtualWearer:
         # about this is the adversarial part.
         return self.rng.random() >= self.cfg["recognition_miss_rate"]
 
+    def _obs_key(self, item: dict) -> Optional[tuple]:
+        """Identity of one presented item, as far as the harness reveals it."""
+        ts, line = item.get("ts"), item.get("line")
+        return (ts, line) if (ts is not None or line) else None
+
     def _observe(self, item: dict) -> None:
         """
         Record that I encountered this item at all.
@@ -428,17 +434,14 @@ class VirtualWearer:
         interrupted me -- and a model that only learns history from the push
         path cannot see diminishing returns at all in a queue-only milestone,
         which is the whole regime milestone 1 runs in.
-
-        Keyed on (ts, line) so one event is counted once however many of my
-        reactions the harness asks for.
         """
-        ts, line = item.get("ts"), item.get("line")
-        if ts is None and not line:
-            return          # unidentifiable: count every presentation
-        key = (ts, line)
-        if key in self._observed:
-            return
-        self._observed.add(key)
+        key = self._obs_key(item)
+        if key is not None:
+            if key in self._observed:
+                return
+            self._observed.add(key)
+        # An item with no distinguishing text cannot be deduplicated, so each
+        # presentation is taken at face value.
         self._n_seen += 1
         now = self._clock_hours()
         for t in self._topics(item):
@@ -501,6 +504,9 @@ class VirtualWearer:
         # respond, but I already lost the attention. This is what makes pushing
         # into a void expensive -- the harness may never call responds().
         item["_pending_interrupt"] = True
+        key = self._obs_key(item)
+        if key is not None:
+            self._interrupted.add(key)
         self._pending.append({"t": self._clock_hours(), "item": item})
         return True
 
@@ -607,16 +613,38 @@ class VirtualWearer:
         )
 
     def _settle(self, item: dict, worth: int, known: int) -> None:
-        """Where trust and fatigue move. This is the adversarial core."""
+        """
+        Where trust and fatigue move. This is the adversarial core.
+
+        The crucial distinction, and the one a careless validation subject gets
+        wrong: **a queue item I ignored is not a mis-fire.** DESIGN's own cost
+        asymmetry says a queue mistake costs one slot and a push mistake costs
+        trust. So worthless-but-queued items cost me a little patience and no
+        trust at all, while a push I did not want costs both. Charge trust for
+        queue noise and the wearer abandons on day one for having been shown a
+        spam digest, which measures nothing about the system.
+        """
         self._n_shown += 1
         self._pending = [p for p in self._pending if p["item"] is not item]
+        key = self._obs_key(item)
+        # An item with no distinguishing text cannot be matched back to an
+        # interrupt; the safest reading is that it was the one that fired.
+        was_interrupt = (key in self._interrupted) if key is not None \
+            else self._n_interrupts > 0
         if not worth or known:
-            # Two kinds of waste, and they are not the same. A wrong item is
-            # noise; a right-but-known item is worse in a way the design's
-            # false_alarm count cannot see, because nothing false was said.
-            self._register_bad(known=bool(known))
+            if was_interrupt:
+                # Two kinds of waste, and they are not the same. A wrong item is
+                # noise; a right-but-known item is worse in a way the design's
+                # false_alarm count cannot see, because nothing false was said.
+                self._register_bad(known=bool(known))
+            else:
+                self._fragments += 0.05
+                self._n_ignored += 1
         else:
-            self._trust = min(1.0, self._trust + self.cfg["trust_gain_good"])
+            if was_interrupt:
+                self._trust = min(1.0, self._trust + self.cfg["trust_gain_good"])
+            else:
+                self._fragments = max(0.0, self._fragments - 0.02)
 
     def _register_bad(self, known: bool, extra_trust: float = 0.0) -> None:
         """One unit of wasted attention. Non-linear in effect, unbounded in
@@ -688,7 +716,8 @@ class VirtualWearer:
                 pull += 0.35
             if value >= self.cfg["threshold"] + 0.6:
                 pull += 0.25
-            pull -= 0.25 * self._fatigue_cost()   # tired: less second-guessing
+            pull -= 0.25 * max(0.0, self._fatigue_cost() - 1.0)  # only resentment
+                                                       # suppresses second looks
             re_examined = self.rng.random() < max(0.0, min(0.85, pull))
         else:
             # Illegible: no return visit -- unless I was interrupted and still

@@ -220,9 +220,12 @@ Design: **[policy.py](policy.py)** · tests: **[experiments/policy_axes.py](expe
 Everything here is reproducible and every number is computed from a real run.
 
 ```bash
-.venv/bin/python main.py --selftest            # 42 offline checks, no radio, no API key
+.venv/bin/python main.py --selftest            # 50 offline checks, no radio, no API key
 .venv/bin/python experiments/glance_gate.py    # glanceability gate + repair
 .venv/bin/python experiments/policy_axes.py     # every axis resolves from evidence
+.venv/bin/python experiments/store_stress.py    # 400 concurrent writes, zero loss
+.venv/bin/python experiments/learning_substrate.py  # does the interest signal survive?
+.venv/bin/python experiments/adaptive_loop.py   # ingestion, gating, heartbeat isolation
 
 ollaya serve                                   # required for the two below
 .venv/bin/python experiments/score_corpus.py   # winnow discrimination over 40 candidates
@@ -246,7 +249,45 @@ ollaya serve                                   # required for the two below
 
 Reports: **[REPORT-A.md](experiments/results/REPORT-A.md)** ·
 **[REPORT-A2-ordinal.md](experiments/results/REPORT-A2-ordinal.md)** ·
-**[clock-feature.md](experiments/results/clock-feature.md)**
+**[clock-feature.md](experiments/results/clock-feature.md)** ·
+**[SOAK.md](experiments/results/SOAK.md)**
+
+### The adaptive loop, and what is still unproven
+
+`run_query()` reads the store **before** either model runs, so stage 2
+compresses against known interests rather than after the fact. The loop:
+
+```
+tap ──► _record()  ──to_thread──► SQLite (events, cards)
+                                  │
+                                  ▼
+                     topic_evidence()  per-CARD, damped, evidence-gated
+                                  │
+                     ┌────────────┴────────────┐
+                     ▼                         ▼
+        stage-2 prompt (gated)        main.py --weights
+```
+
+Four properties are measured, not asserted:
+
+| claim | measured |
+|---|---|
+| Writes never stall the BLE heartbeat | **control 21.8ms vs off-loop 11.1ms** against a 10ms nominal heartbeat. The control arm is the load-bearing one: it proves the instrument can detect a stall at all. |
+| Concurrent writes are durable | 8 threads × 50 writes → **400/400 rows**, 400 distinct ids, 0 orphans. |
+| A topic is an interest, not one tap | 4 taps on one card → weight 2.23 but **excluded** from the prompt; 2+ distinct cards required. |
+| Silence stays silence | never-reacted terms sit at exactly neutral with `cards=0`, and adding them does not reorder the ranking. |
+
+```bash
+.venv/bin/python main.py --weights   # what the prompt is built from, and why
+```
+
+**What is not proven.** That this improves anything for a real wearer. The A/B
+promised in `.context/llm.md` is still unrun, and stage 2 structurally *cannot*
+log which fact it chose, so compliance with the interest rules is unobservable
+from the display output. The honest summary: the substrate now measures
+cleanly, the injection is gated so it cannot invent facts, and whether it earns
+its place is an open question with a flag (`personalise=False`) ready to settle
+it.
 
 ---
 
@@ -326,6 +367,7 @@ corrections are kept visible rather than quietly edited:
 | 12 | [Turn C: gait and host](documents/12-turn-C-gait-and-host.md) | Gait simulation, the ρ cliff, and the two-tier host split. |
 | 13 | [Round 2: Claude convergence](documents/13-round2-claude-convergence.md) | Final design proposal, plus the sharpest argument in the corpus. |
 | 14 | [Round 2: zcode convergence](documents/14-round2-zcode-convergence.md) | Final design proposal, partly in disagreement with 13. |
+| 15 | [Adversarial finding triage](documents/15-adversarial-finding-triage.md) | What survived an attack, what did not, and what is still open. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.

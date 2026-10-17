@@ -1,24 +1,25 @@
 {
   "policy": {
     "arm": "policy",
-    "days": 14,
-    "candidates": 331,
-    "queued": 331,
+    "days": 30,
+    "candidates": 659,
+    "queued": 659,
     "pushed": 0,
-    "overflow": 315,
-    "peeks": 54,
-    "examined": 4,
+    "overflow": 609,
+    "peeks": 76,
+    "examined": 39,
     "re_examined": 0,
-    "reviewed": 406,
-    "earned": 4,
-    "rejected": 402,
-    "already_knew": 0,
-    "queue_worth_rate": 0.0121,
-    "examined_rate": 0.0121,
+    "reviewed": 867,
+    "earned": 538,
+    "urgent": 9,
+    "rejected": 271,
+    "already_knew": 144,
+    "queue_worth_rate": 0.8164,
+    "examined_rate": 0.0592,
     "re_examination_rate": 0.0,
     "axes_final": {
       "examination_source": "touchbar",
-      "g1_model": "off",
+      "g1_model": "on",
       "interrupt_gate": "rules",
       "detail_generation": "off",
       "push_enabled": "off"
@@ -30,8 +31,8 @@
     ],
     "evidence": {
       "g1_model": {
-        "n_labels": 266,
-        "queue_worth_rate": 0.0
+        "n_labels": 567,
+        "queue_worth_rate": 0.6243386243386243
       },
       "detail_generation": {
         "drill_miss_rate": null
@@ -43,28 +44,29 @@
         "label_days": 1
       }
     },
-    "wall_seconds": 0.03
+    "wall_seconds": 0.06
   },
   "fixed": {
     "arm": "fixed",
-    "days": 14,
-    "candidates": 331,
-    "queued": 331,
+    "days": 30,
+    "candidates": 659,
+    "queued": 659,
     "pushed": 0,
-    "overflow": 315,
-    "peeks": 54,
-    "examined": 4,
+    "overflow": 609,
+    "peeks": 76,
+    "examined": 39,
     "re_examined": 0,
-    "reviewed": 406,
-    "earned": 4,
-    "rejected": 402,
-    "already_knew": 0,
-    "queue_worth_rate": 0.0121,
-    "examined_rate": 0.0121,
+    "reviewed": 867,
+    "earned": 538,
+    "urgent": 9,
+    "rejected": 271,
+    "already_knew": 144,
+    "queue_worth_rate": 0.8164,
+    "examined_rate": 0.0592,
     "re_examination_rate": 0.0,
     "axes_final": {
       "examination_source": "touchbar",
-      "g1_model": "off",
+      "g1_model": "on",
       "interrupt_gate": "rules",
       "detail_generation": "off",
       "push_enabled": "off"
@@ -76,8 +78,8 @@
     ],
     "evidence": {
       "g1_model": {
-        "n_labels": 266,
-        "queue_worth_rate": 0.0
+        "n_labels": 567,
+        "queue_worth_rate": 0.6243386243386243
       },
       "detail_generation": {
         "drill_miss_rate": null
@@ -89,6 +91,6 @@
         "label_days": 1
       }
     },
-    "wall_seconds": 0.02
+    "wall_seconds": 0.06
   }
 }
