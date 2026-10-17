@@ -26,11 +26,93 @@ SQLite.
 - [Using the LLM pipeline](#using-the-llm-pipeline)
 - [Providers: any local or cloud model](#providers-any-local-or-cloud-model)
 - [Policy axes: disagreements as switches](#policy-axes-disagreements-as-switches)
+- [The interrupt decision](#the-interrupt-decision)
 - [Experiments](#experiments)
 - [Simulation](#simulation)
 - [What is verified, what is not](#what-is-verified-what-is-not)
 - [Documentation index](#documentation-index)
 - [Repository layout](#repository-layout)
+
+---
+
+## Where this is going
+
+A short map, because the interesting part of this repository is a chain of
+things that looked finished and were not.
+
+**The product.** A relay agent that watches a stream of events and decides
+whether to interrupt a person walking around wearing glasses. The promise is
+silence by default: the most expensive thing it can do is interrupt for
+something worthless.
+
+**What exists today.** A pipeline that turns a typed question into 120
+characters on a lens, a learning ledger, a policy layer, and — since the last
+few commits — the interrupt *decision* as a pure, fully offline-testable
+function. `main.py --queue` runs it against a spool and prints what it would
+do. **Nothing ships that sends a push.**
+
+**Three classes of work, in the order they happened:**
+
+| | what | why it matters |
+|---|---|---|
+| 1 | Measure, falsify, remove | The interest injection was measured and deleted rather than disabled ([18](documents/18-personalisation-measured.md)). A documented-but-unwired plugin seam and a decision function that did not exist were found by a mechanical audit, not by reading ([19](documents/19-wiring-audit.md)). |
+| 2 | Give the policy an input | No code computed any policy metric, so all five axes resolved to their defaults forever. Splitting `drill_miss` from `drill_deferred` stopped a metric measuring its own deferrals ([20](documents/20-evidence-bridge.md)). |
+| 3 | Build the safety envelope offline | Budget counted from real timestamps rather than a counter that only climbs; a kill-switch; a 24h auto-suspend that cannot be triggered by absence; a link gate that refuses a one-lens card. Three bugs found along the way that would all have shipped ([21](documents/21-phase3-findings.md)). |
+
+**And the honest limit.** The literature says you cannot both collect real
+labels and learn per-event from the same stream — that is an identification
+problem, not an engineering one ([22](documents/22-interruption-verification.md)).
+So the next decision is *which phase this system is in*, not which feature to
+add next.
+
+**Blocked on a person, not on code:** a G1 on a BlueZ host (rung 4 of the
+rollout ladder is a ten-minute session, not an engineering task), a real
+`apikey_…` for Jev, and `zcode login`.
+
+---
+
+## The interrupt decision
+
+`interrupt.py` holds the push-vs-queue decision as a **pure function**.
+Candidates in, verdicts out. No BLE, no radio, no ledger — which is the whole
+constraint, because every claim here has to be checkable without glasses and
+there are no glasses.
+
+```bash
+main.py --queue --queue-dir ./spool      # what would happen (dry run)
+main.py --queue --queue-record           # ...and write it to the ledger
+main.py --review                         # a human labels what was decided
+main.py --evidence                       # which policy metrics are real
+```
+
+The gates, in order, each refusing rather than degrading:
+
+1. **kill-switch** — a file, re-read every cycle, so a process that has stopped
+   answering its terminal can still be stopped. Absence means disarmed.
+2. **budget** — ≤2/hour, ≤4/day, counted from durable timestamps. A failed
+   attempt still spends it.
+3. **policy axis** — `push_enabled`, which with no label history is off.
+4. **suspension** — one mis-fire mutes that source class for 24h. Never
+   triggered by absence, never by a transport failure, never escalated to a
+   global mute, and suspended means **queued**, not dropped.
+5. **link** — both arms, MTU negotiated, heartbeat fresh. A dead right arm is
+   refused rather than rendering a card on one lens.
+6. **G2 eligibility** — the deterministic rules from `DESIGN.md`.
+
+Nothing is ever dropped. A candidate that fails a gate is queued, because
+silence is the default and silently discarding things is the one outcome this
+system may not choose.
+
+The chain that makes it real now closes end to end:
+
+```
+decide -> record -> a human labels it -> --evidence shows derived metrics
+```
+
+Three of the five policy axes moved from "no source" to "derived" the first
+time that loop was run. The fourth, `rho`, needs a calibration walk on
+hardware. The fifth, `interrupt_gate`, is arithmetic that says it should stay
+on `rules` forever — see [21](documents/21-phase3-findings.md).
 
 ---
 
