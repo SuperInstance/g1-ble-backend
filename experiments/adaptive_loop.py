@@ -267,6 +267,46 @@ async def main() -> int:
         ]), config=cfg, store=SlowStore(store, 0.0), verbose=False)
 
 
+        print("\n3b. one-stage interest injection (the DEFAULT path)")
+        # The shipped default is one call, which is what makes the stage-2
+        # prompt unreachable by default. If the interests are not wired into
+        # this path too, the whole adaptive loop is inert -- which is exactly
+        # what happened when the architecture flipped and went unnoticed.
+        from pipeline import build_one_stage_system
+
+        cfg_two = config()
+        cfg_two.two_stage = False
+
+        async def ask_one_stage(personalise: bool, q: str):
+            from session import Session
+            fake = FakeClient(["Stripe gratings split light into orders."])
+            out: list[str] = []
+
+            async def send2(text: str) -> None:
+                out.append(text)
+
+            sess = Session(
+                send=send2, store=FeedbackStore(store.path), config=cfg_two,
+                client=fake, personalise=personalise,
+            )
+            await sess.ask(q)
+            return fake
+
+        f1 = await ask_one_stage(True, "why does light diffract through a stripe grating?")
+        sent1 = system_of(f1, 0)
+        check("ONE-STAGE: on-topic query receives the block",
+              "<interests>" in sent1)
+        check("ONE-STAGE: block states it has no authority over truth",
+              "NO authority over what is true" in sent1)
+
+        f2 = await ask_one_stage(True, "how do mango cultivars ripen?")
+        check("ONE-STAGE: off-topic query gets NO block",
+              "<interests>" not in system_of(f2, 0))
+
+        f3 = await ask_one_stage(False, "why does light diffract through a stripe grating?")
+        check("ONE-STAGE: personalise=False is byte-identical to base",
+              system_of(f3, 0) == build_one_stage_system(None))
+
         print("\n4. learning is visible over time")
         before = store.topic_evidence()
         for n in range(3):

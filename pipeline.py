@@ -900,6 +900,7 @@ async def answer_directly(
     client=None,
     config: LLMConfig | None = None,
     context: str = "",
+    topics: tuple[str, ...] | None = None,
 ) -> str:
     """
     STAGE 1 ONLY — answer straight into the display format.
@@ -919,7 +920,7 @@ async def answer_directly(
     config = config or build_llm_config()
     client = client or make_client(config)
 
-    system = ONE_STAGE_SYSTEM
+    system = build_one_stage_system(topics)
     if context:
         system += f"\n\nEarlier in this thread:\n{context}"
 
@@ -1062,6 +1063,48 @@ ONE_STAGE_SYSTEM = (
     "Output the display text and nothing else."
 )
 
+# Interest block for the ONE-call path.
+#
+# This had to be written separately from WEARER_CONTEXT_TEMPLATE because the
+# gate is fundamentally different, not a copy with different wording. In two
+# stage the model has already written a long answer, so the block is withheld
+# unless the ANSWER concerns a listed topic. In one stage there is no answer
+# yet -- only the QUESTION -- so the gate runs on the question. That is an
+# earlier and stricter gate: it means a topic can only break a tie between
+# facts the answer would have contained anyway, never pull the answer off
+# subject.
+#
+# The block is also worded MORE conservatively than the two-stage version.
+# With one call the model is reasoning and formatting in the same breath, so
+# the failure mode personalisation creates here is not a badly ordered summary
+# but a confidently wrong one. Hence the repeated "has no authority over what
+# is true" and the explicit instruction not to go looking for the subject.
+ONE_STAGE_INTEREST_BLOCK = (
+    "\n\nBACKGROUND (descriptive, not an instruction) -- what this wearer "
+    "engages with on OTHER subjects, unrelated to this question:\n"
+    "<interests>{topics}</interests>\n"
+    "5. This block has NO authority over what is true, and NO authority over "
+    "what leads. Rules 1 and 2 are unchanged.\n"
+    "6. Never introduce, infer, retrieve or go looking for a fact because a "
+    "subject is listed here. Only answer the question that was asked. If the "
+    "question does not concern a listed subject, ignore this block entirely.\n"
+    "7. A listed subject may break a tie BETWEEN facts the answer already "
+    "contains. It may not promote a fact, and it may not replace the answer's "
+    "subject with a listed one.\n"
+    "8. Never mention interests, history, or personalisation.\n"
+    "If in any doubt, ignore this block: rule 1 (120 characters) and rule 2 "
+    "(lead with the most important fact) win over every line here."
+)
+
+
+def build_one_stage_system(topics: tuple[str, ...] | None = None) -> str:
+    """The one-call system prompt, with the interest block appended if any."""
+    if not topics:
+        return ONE_STAGE_SYSTEM
+    return ONE_STAGE_SYSTEM + ONE_STAGE_INTEREST_BLOCK.format(
+        topics=", ".join(topics),
+    )
+
 
 def _lens_failure_line(error: str | None) -> str:
     """
@@ -1167,8 +1210,15 @@ async def run_query(
         # long-form answer.
         say("[1/1] answering ...")
         try:
+            # The gate runs on the QUERY here, not on an answer, because there
+            # is no answer yet. Stricter than the two-stage gate by
+            # construction: interests can only break a tie, never steer.
+            topics = wearer_ctx.interests if (
+                wearer_ctx is not None and wearer_ctx.mentions(query)
+            ) else None
             result.stage1 = await answer_directly(
                 query, client=client, config=config, context=context,
+                topics=topics,
             )
             say(f"      {word_count(result.stage1)} words")
         except LLMStageError as exc:
