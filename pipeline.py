@@ -590,7 +590,30 @@ _TIME_RE = re.compile(
     r"|wednesday|thursday|friday|saturday|sunday)\b",
     re.IGNORECASE,
 )
-_PROPER_NOUN_RE = re.compile(r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]{2,}")
+# A capitalised token is treated as a name unless it is a word that merely
+# starts a sentence or clause. The previous pattern excluded ALL
+# sentence-initial capitals, which threw away the single most glanceable case:
+# a line that leads with the name of the thing -- "Prince Hamlet seeks...",
+# "Sunlight scatters...". Those are exactly the lines a wearer reads fastest.
+_LEADING_NON_NAMES = frozenset("""
+the a an this that these those it its they them he she we you i there here
+why how what when where which who whom is are was were do does did can could
+will would should may might must have has had been being and but or so then
+if but as at by for from in into of on to with without within over under
+one two three four five six seven eight nine ten first second next last
+every each some any all both more most less least very just also only
+""".split())
+
+_NAME_TOKEN = r"[A-Z][a-z]{2,}"
+
+
+def _is_name(token: str) -> bool:
+    return token.lower() not in _LEADING_NON_NAMES
+
+
+_PROPER_NOUN_RE = re.compile(
+    r"\b[A-Z][a-z]{2,}\b(?!\s*[,.]\s+[a-z])"
+)
 _CONCRETE_TOKEN_RE = re.compile(
     r"\b\d[\d,.:]*\b|" + "|".join(sorted(_CONCRETE_LEXICON))
 )
@@ -613,13 +636,31 @@ def glanceability_features(text: str) -> dict:
         return {"digit": 0.0, "proper": 0.0, "time": 0.0, "lead": 6.0}
 
     digit = 1.0 if re.search(r"\d", clean) else 0.0
-    proper = 1.0 if _PROPER_NOUN_RE.search(clean) else 0.0
     time = 1.0 if _TIME_RE.search(clean) else 0.0
 
+    # `lead` used to look only for digits and a 30-word lexicon, so on real
+    # model output it was pinned at its 6.0 cap almost every time -- which
+    # made the score unsatisfiable and the gate fire on nearly everything.
+    # A capitalised name counts as concrete too, so leading with the thing
+    # itself reads as glanceable.
     lead = 6.0
-    match = _CONCRETE_TOKEN_RE.search(clean)
-    if match:
+    match = None
+    for m in _CONCRETE_TOKEN_RE.finditer(clean):
+        tok = m.group(0)
+        if m.group(0)[:1].isupper() and not _is_name(tok):
+            continue
+        match = m
+        break
+    if match is None:
+        m2 = _PROPER_NOUN_RE.search(clean)
+        if m2 and _is_name(m2.group(0)):
+            match = m2
+    if match is not None:
         lead = min(6.0, float(len(clean[: match.start()].split())))
+
+    proper = 1.0 if any(
+        _is_name(t) for t in re.findall(r"\b[A-Z][a-z]{2,}\b", clean)
+    ) else 0.0
 
     return {"digit": digit, "proper": proper, "time": time, "lead": lead}
 

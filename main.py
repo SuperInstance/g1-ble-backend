@@ -56,6 +56,7 @@ from g1_driver import EvenG1Controller, hexdump
 from memory import FeedbackStore
 from pipeline import (
     _lens_failure_line,
+    check_glanceable,
     DEFAULT_MAX_DISPLAY_CHARS,
     DEFAULT_MAX_DISPLAY_WORDS,
     DISPLAY_LINES,
@@ -955,6 +956,28 @@ def selftest() -> int:
 
     print("BLE packet format")
     ble_status = ble_selftest()
+
+    # Regression: the glanceability gate was structurally unsatisfiable. Its
+    # score was digit + proper + time - lead/6 against a 0.5 floor, and `lead`
+    # pinned to its 6.0 cap whenever no digit or lexicon word appeared early.
+    # A line with a proper noun and nothing else therefore scored 1 - 1 = 0.0
+    # and always failed, so the gate fired on ~67% of real model output and
+    # sent good text into the repair path. Found by play-testing.
+    print("\nglanceability gate")
+    for good in (
+        "Sky is blue because shorter wavelengths scatter more than longer ones",
+        "Prince Hamlet seeks revenge on Claudius for murdering his father",
+        "Boiling point of water at altitude: 95C",
+        "Cheetahs have a small brain (120g), relying on speed not force",
+    ):
+        check(f"accepts {good[:28]!r}", check_glanceable(good).ok, True)
+    for bad in (
+        "ok",
+        "This was fixed.",
+        "It is important to note that results may vary.",
+        "In conclusion, the situation has improved considerably overall",
+    ):
+        check(f"rejects {bad[:28]!r}", check_glanceable(bad).ok, False)
 
     print("\ndisplay post-processing")
     check("strips markdown", strip_display_noise("**bold** text"), "bold text")

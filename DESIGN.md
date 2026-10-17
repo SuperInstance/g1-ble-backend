@@ -161,6 +161,29 @@ Agreed by both convergence rounds:
 - **The two-stage pipeline for queue lines** — queue lines are template plus
   truncation; no model call.
 
+> **Correction (2026-10-16): the two-stage LLM split was removed as the
+> default.** It was justified here with *"asking one model to do both degrades
+> the reasoning"* — an assertion that had never been measured. Measured against
+> a 20-item ground-truth corpus, it did not survive:
+>
+> | | one call | two calls |
+> |---|---|---|
+> | median latency | **0.26s** | 2.38s |
+> | key facts recalled | 19/20 | 19/20 |
+> | invented numbers | 1 | 3 (one real error each) |
+>
+> Nine to thirteen times slower for identical recall and no measurable
+> protection against invented numbers. The default is now a single call;
+> `G1_TWO_STAGE=1` or `--two-stage` restores the old path so the comparison
+> can be repeated. Two measurement artifacts were caught and fixed along the
+> way — both would have flattered the conclusion, and both are written up in
+> `documents/16`. End to end, median wall time went from **6.71s to 0.48s** and
+> the system went from *not usable walking* to *usable walking*.
+>
+> The honest limit: n=20 cannot certify that one call is safe in general. It
+> establishes that the expensive path's stated benefit is **unsupported**, which
+> is a different and narrower claim.
+
 ---
 
 ## 6. Milestone 1 — "spool to lens"

@@ -243,7 +243,7 @@ ollaya serve                                   # required for the two below
 | A clock feature **does not help** | Tested and **falsified**. Every veto variant made it worse. The errors are tier assignment, not time arithmetic. |
 | Glanceability: winnow beats a regex | 0.838 vs 0.688, paired bootstrap Δ +0.150 — but winnow verifies *concreteness*, not *glanceability*, and is blind to burial. |
 | Gaze has a **cliff** at ρ = θ/A_b ≥ 1.6 | Below it, fabricated glances *contaminate* labels rather than adding noise. |
-| Latency claims were ~5–7× optimistic | **CORRECTION.** 110 ms is `winnow`'s number and winnow is **not on the display path**. Measured end to end against a real model (2026-10-16, qwen2.5-coder:7b, RTX 4050): median **6.71 s**, max **19.55 s** — stage 1 alone is 85% of it, at 37.7 tok/s. **Not usable while walking.** See [play-test](#the-wearers-experience-measured). |
+| **The two-stage LLM split is gone** | `DESIGN.md` claimed one model doing both "degrades the reasoning", never tested. Measured on a 20-item ground-truth corpus: one call is **9–13x faster at identical recall and no less accurate on invented numbers**. End-to-end median **6.71s → 0.48s**. `G1_TWO_STAGE=1` restores it. |
 | `winnow` fits alone, cannot share | 5826/6141 MiB resident — 95% of VRAM. |
 | `tev1` is unusable | No chat template; rejected by the OpenAI-compatible endpoint. |
 
