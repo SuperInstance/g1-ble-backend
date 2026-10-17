@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import policy  # noqa: E402
 from policy import POLICY_AXES, resolve  # noqa: E402
 
 SCENARIOS = [
@@ -80,6 +81,52 @@ def main() -> int:
         print("  VALIDATION: FAILED to reject a bad option")
     except ValueError:
         print("  VALIDATION: bad option rejected")
+
+    # An override must not read as a measurement.
+    #
+    # `--set-policy push_enabled=on` used to produce Decision(..., True), so
+    # the axis vanished from Policy.unresolved() and any gate keyed on "is
+    # this settled?" would accept a human assertion as evidence. The pin
+    # persists in policy.json, so the failure mode is a test switch outliving
+    # the test session: flip an axis to watch something happen, forget, and
+    # find weeks later that a live process has been running on the pin.
+    p = resolve({}, {"push_enabled": "on"})
+    manual = p.decisions["push_enabled"]
+    ok = manual.manual and not manual.enough_evidence
+    fails += not ok
+    print(f"  OVERRIDE is not evidence: manual={manual.manual} "
+          f"enough={manual.enough_evidence} "
+          f"{'ok' if ok else 'FAIL'}")
+
+    ok = p.manual() == ["push_enabled"] and not p.settled_by_evidence("push_enabled")
+    fails += not ok
+    print(f"  manual() names it: {p.manual()} "
+          f"{'ok' if ok else 'FAIL'}")
+
+    # Control: an axis settled BY EVIDENCE must still count, or the fix above
+    # would be "never trust the policy", which is not the claim.
+    settled = resolve({"push_enabled": {"label_days": 20}})
+    ok = settled.settled_by_evidence("push_enabled")
+    fails += not ok
+    print(f"  CONTROL: evidence-settled axis still counts: {ok}")
+
+    # And a pin must be able to lapse on its own.
+    import tempfile
+    import time as _time
+    with tempfile.TemporaryDirectory() as tmp:
+        orig = policy.policy_path
+        policy.policy_path = lambda: Path(tmp) / "policy.json"
+        try:
+            policy.save_overrides({"push_enabled": "on"}, ttl_s=0.2)
+            alive = policy.load().get("push_enabled")
+            _time.sleep(0.35)
+            lapsed = policy.load().get("push_enabled")
+            ok = alive == "on" and lapsed == "off"
+            fails += not ok
+            print(f"  TTL expires unattended: {alive!r} -> {lapsed!r} "
+                  f"{'ok' if ok else 'FAIL'}")
+        finally:
+            policy.policy_path = orig
 
     print(f"\n{'FAILED' if fails else 'passed'}: {fails} problem(s)")
     return 1 if fails else 0

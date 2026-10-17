@@ -210,7 +210,21 @@ python main.py --set-policy g1_model=on         # pin one by hand; persists
 | `push_enabled` | `off` / `on` | `off` | a full fortnight of tier labels | none |
 
 **Safety property, tested:** with zero evidence every axis holds its
-conservative default. An axis cannot be switched on by opinion.
+conservative default. An axis cannot be switched on by opinion — and a
+`--set-policy` pin cannot either: overrides are recorded as `manual=True,
+enough_evidence=False`, so `settled_by_evidence()` refuses them and `--evidence`
+names them. `--override-ttl-hours` makes a test pin expire on its own when the
+policy loads.
+
+**`interrupt_gate` is not a milestone, and the arithmetic says so.** Its ≥299
+clean pushes is a *guard against silently relaxing the rules*, not a roadmap:
+the correct construct is a streak that resets on the first false push, and at
+a true 1% false rate the chance of an uninterrupted clean run of 299 is 5% —
+about 1,900 pushes, roughly **480 days** at the 4/day cap. Leave it on `rules`.
+The axis that *can* move is `g1_model`, because queued items legitimately feed
+`queue_worth_rate`; queued items must **not** count toward `clean_pushes`,
+which measures what happened when the gate said yes.
+[documents/21](documents/21-phase3-findings.md)
 
 **The honest state, since `main.py --evidence` reports it:** exactly one of
 these five has a data source in shipped code. `detail_generation` reads
@@ -434,6 +448,7 @@ corrections are kept visible rather than quietly edited:
 | 18 | [Personalisation, measured](documents/18-personalisation-measured.md) | The A/B, the verdict, and the removal — including a third injection site that was never wired to anything. |
 | 19 | [The wiring audit](documents/19-wiring-audit.md) | What is described as working and is not: the dormant plugin seam, a gate that stopped running, and a decision function that did not exist. |
 | 20 | [The evidence bridge](documents/20-evidence-bridge.md) | Why the policy could not change, a metric that measured its own deferrals, and absent-is-not-zero. |
+| 21 | [Phase 3 findings](documents/21-phase3-findings.md) | Two bugs that would have shipped, the observability cell, and why the 299-push target is unreachable. |
 
 The synthesised design is **[DESIGN.md](DESIGN.md)** — read its *Contested*
 section before building anything, because those questions became switches.

@@ -262,8 +262,109 @@ def main() -> int:
               b4.evidence()["push_enabled"].get("label_days") == 0)
         store.close()
 
-    print()
-    print(f"summary: {q.summarize(q.plan(mixed, budget=q.Budget(label_days=20), now=NOW))}")
+    print("\n10. the simulator's own spool format parses and decides")
+    # Contract test. `sim/events.py` has always written the documented spool
+    # format with the key "class"; this module's parser read "cls". Every
+    # simulated candidate therefore parsed as class "unknown" and failed G2
+    # eligibility forever, with no exception and no log line -- a queue that
+    # silently never pushes looks exactly like a conservative one.
+    #
+    # The rule this enforces: if two modules agree on a contract, the contract
+    # itself needs a test. Round-tripping the real producer is the only check
+    # that would ever have noticed.
+    from sim.events import Candidate as SimCandidate
+
+    sim_cand = SimCandidate(
+        cid="c1", source="cal", cls="meeting", line="Standup with Ana",
+        ts=NOW, subject="meeting", keywords=("meeting",),
+        accepted=True, minutes_until=4.0,
+    )
+    parsed = q.Candidate.from_json(sim_cand.as_spool_json())
+    check("sim's 'class' key is read, not defaulted to unknown",
+          parsed.cls == "meeting", f"got {parsed.cls!r}")
+    check("the simulated meeting is eligible under G2",
+          parsed.eligible(NOW)[0], parsed.eligible(NOW)[1])
+
+    sim_blocked = SimCandidate(
+        cid="c2", source="build", cls="blocked_job", line="CI red",
+        ts=NOW, subject="infra", blocked=True, elapsed_s=400,
+    )
+    parsed_b = q.Candidate.from_json(sim_blocked.as_spool_json())
+    check("the simulated blocked job is eligible too",
+          parsed_b.eligible(NOW)[0], parsed_b.eligible(NOW)[1])
+
+    # And end to end: a whole simulated day through the real decision.
+    verds = q.plan([parsed, parsed_b], budget=q.Budget(label_days=20), now=NOW)
+    check("a simulated day produces real pushes through the real decision",
+          sum(v.is_push for v in verds) == 2,
+          f"{sum(v.is_push for v in verds)} of {len(verds)}")
+
+    # Sim's eligibility rule and the shipped G2 must agree, or the harness is
+    # measuring a different product from the one interrupt.py implements.
+    check("sim's own eligibility agrees with G2 on a meeting",
+          sim_cand.is_eligible_to_push == parsed.eligible(NOW)[0])
+    check("sim's own eligibility agrees with G2 on a blocked job",
+          sim_blocked.is_eligible_to_push == parsed_b.eligible(NOW)[0])
+
+    print("\n11. the budget is counted, not accumulated")
+    # The failure this prevents: Budget.spend() only incremented, so in a
+    # long-running process pushes_last_hour would reach 2 and stay there --
+    # a daemon that pushed twice and then went silent forever, with a log
+    # full of successes and no error anywhere. A silent daemon is worse than
+    # a broken one, because nobody goes looking for it.
+    #
+    # Timestamps here are relative to the REAL clock, because
+    # evidence_from_store() reads the wall time and a synthetic 2026 stamp
+    # would sit outside the window by however long the suite has been running.
+    import time as _t
+    with _tf.TemporaryDirectory() as tmp:
+        bstore = FeedbackStore(Path(tmp) / "push.db")
+        t0 = _t.time()
+        # two recent, one 90 minutes old, one two days old
+        for offset, cls in ((60, "meeting"), (120, "device"),
+                            (5400, "meeting"), (172800, "meeting")):
+            bstore.record_push(cls, source="cal", text="x", ts=t0 - offset)
+
+        hh, dd = bstore.push_counts()
+        check("hourly count ignores pushes outside the window",
+              hh == 2, f"{hh} (want 2)")
+        check("daily count ignores a push from a previous day",
+              dd == 3, f"{dd} (want 3)")
+
+        b, prov_b = q.evidence_from_store(bstore)
+        check("the evidence bridge reports both as derived",
+              prov_b.get("pushes_last_hour") == "derived"
+              and prov_b.get("pushes_today") == "derived")
+        check("the bridge carries the real counts through",
+              b.pushes_last_hour == 2 and b.pushes_today == 3,
+              f"{b.pushes_last_hour}/{b.pushes_today}")
+
+        from policy import resolve
+        spent = resolve(b.evidence())
+        check("a spent budget makes the policy refuse to push",
+              spent.get("push_enabled") == "off",
+              spent.evidence_for("push_enabled").reason)
+
+        # THE assertion. An hour later the hourly budget must come BACK.
+        # An increment-only counter cannot decrease, so this is the line that
+        # fails if the construct regresses.
+        hh_later, dd_later = bstore.push_counts(now=t0 + 3600)
+        check("an hour later the hourly budget is available again",
+              hh_later == 0, f"{hh_later} (want 0 -- both recent pushes aged out)")
+        check("the daily budget survives within the same day",
+              dd_later == 3, f"{dd_later} (want 3)")
+
+        # Intent is recorded BEFORE the write, so a crash between deciding and
+        # sending still spends the budget.
+        row = bstore.record_push("meeting", source="cal", text="crashy")
+        before, _ = bstore.push_counts()
+        bstore.settle_push(row, "transport_error")
+        after, _ = bstore.push_counts()
+        check("a FAILED attempt still spends the budget",
+              before == after == 3,
+              f"{before} before settle, {after} after -- budget is spent on "
+              f"ATTEMPT, not on success")
+        bstore.close()
     print()
     if FAILURES:
         for f in FAILURES:

@@ -333,7 +333,58 @@ async def main() -> int:
         check("ONE-STAGE: off-topic query gets NO block",
               _BLOCK_MARKER not in system_of(f2, 0))
 
-        print("\n4. learning is visible over time")
+        print("\n5. observability: a card in the pocket is not a card ignored")
+        # The distinction this buys is the whole point. "The wearer did not
+        # react" has two causes -- they looked away, or the glasses were in
+        # the case. Only the first is evidence about the wearer. The firmware
+        # emits the wear-state events either way and handle_touch used to drop
+        # all of them, because none of them map to an action.
+        import tempfile as _tf
+        from memory import FeedbackStore as _Store
+        from session import WEAR_STATE_EVENTS
+        from session import Session as _Session
+
+        with _tf.TemporaryDirectory() as tmp2:
+            os_store = _Store(Path(tmp2) / "obs.db")
+            cfg_o = config()
+
+            async def ask_and_read(packets: list[bytes]) -> tuple[bool, str]:
+                fake = FakeClient(["Stripe splits light into orders."])
+                out: list[str] = []
+
+                async def send2(text: str) -> None:
+                    out.append(text)
+
+                sess = _Session(send=send2, store=_Store(os_store.path),
+                                config=cfg_o, client=fake)
+                for pkt in packets:
+                    sess.handle_touch("LEFT", pkt)
+                await sess.ask("why does light diffract")
+                return sess.observable, os_store.events_for_card(
+                    sess.current.card.id)[-1].detail
+
+            worn_ob, detail_a = await ask_and_read([bytes([0xF5, 0x06])])
+            check("worn: the card records itself as observable",
+                  worn_ob and detail_a == "observable=1", detail_a)
+
+            cased_ob, detail_b = await ask_and_read(
+                [bytes([0xF5, 0x0B])])          # placed in case, lid closed
+            check("in the case: the card records itself as NOT observable",
+                  (not cased_ob) and detail_b == "observable=0", detail_b)
+
+            dash_ob, _ = await ask_and_read([bytes([0xF5, 0x1E])])
+            check("dashboard open: not observable", dash_ob is False)
+
+            back_ob, _ = await ask_and_read(
+                [bytes([0xF5, 0x0B]), bytes([0xF5, 0x06])])
+            check("worn again: observable returns", back_ob is True)
+
+            check("all six wear-state bytes are decoded, none mapped to action",
+                  set(WEAR_STATE_EVENTS) == {0x06, 0x07, 0x08, 0x0B, 0x1E, 0x1F},
+                  str(sorted(hex(k) for k in WEAR_STATE_EVENTS)))
+            os_store.close()
+
+        print("\n6. learning is visible over time")
         before = store.topic_evidence()
         for n in range(3):
             cid = store.add_card(query=f"mango {n}", stage1="z" * 400,

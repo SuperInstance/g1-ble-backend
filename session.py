@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from g1_driver import TOUCH_EVENT_NAMES
 from memory import Card, FeedbackStore, extract_keywords
 from policy import load
 from pipeline import (
@@ -44,6 +45,25 @@ from pipeline import (
 )
 
 log = logging.getLogger("g1.session")
+
+# TouchBar sub-commands that say whether the wearer COULD have seen the lens.
+#
+# They map to no action, so handle_touch used to drop all of them on the
+# `action is None` branch -- the firmware was emitting them and the host was
+# throwing them away. They are the only free observability evidence in the
+# system: the hardware sends them whether or not anyone listens.
+#
+# `observable=False` means "absence of a reaction is missing data, not a
+# negative". That distinction is the difference between a review queue the
+# wearer can trust and one that learns that cards in a pocket are worthless.
+WEAR_STATE_EVENTS: dict[int, bool] = {
+    0x06: True,    # glasses worn
+    0x07: False,   # removed, not in case
+    0x08: False,   # placed in case, lid open
+    0x0B: False,   # placed in case, lid closed
+    0x1E: False,   # dashboard open
+    0x1F: True,    # dashboard closed
+}
 
 # TouchBar sub-commands (0xF5 ...) mapped to session actions.
 #
@@ -137,6 +157,23 @@ class Session:
         self.stats = SessionStats()
         self._pending: set[asyncio.Task] = set()
 
+        # Whether a card placed on the lens could physically have been seen.
+        #
+        # This exists because "never examined" has two completely different
+        # causes -- the wearer looked away, or the glasses were in the case /
+        # the dashboard was covering them -- and only the first is evidence
+        # about the wearer. Treating the second as a negative is how a review
+        # UI ends up labelling a card worthless because it was in a pocket,
+        # and it is the specific failure documents/09-schema.sql warns about
+        # when it says "never examined is missing data, NOT a negative label".
+        #
+        # The firmware already emits every one of these transitions
+        # (0x06/0x07/0x08/0x0B/0x1E/0x1F in g1_driver.TOUCH_EVENT_NAMES) and
+        # handle_touch was discarding all of them, because none of them map to
+        # an action. Cost to the wearer: zero. It is telemetry the hardware
+        # emits whether or not anyone listens.
+        self.observable: bool = True
+
     # -- helpers -----------------------------------------------------------
 
     @property
@@ -213,6 +250,8 @@ class Session:
         displayed = Displayed(card=card, depth=0, parent_id=None, result=result)
         # A new question replaces the thread rather than stacking under it.
         self.stack = [displayed]
+        await self._record(card.id, "shown",
+                           f"observable={int(self.observable)}")
         return displayed
 
     async def _record(self, card_id: int, kind: str, detail: str = "") -> bool:
@@ -315,6 +354,8 @@ class Session:
         child = Displayed(card=card, depth=top.depth + 1, parent_id=top.card.id,
                           result=result)
         self.stack.append(child)
+        await self._record(card.id, "shown",
+                           f"observable={int(self.observable)}")
         return child
 
     async def dismiss(self) -> Optional[Displayed]:
@@ -403,6 +444,15 @@ class Session:
         """
         if len(data) < 2 or data[0] != 0xF5:
             return
+        # BEFORE the action lookup, and before the `self.current is None`
+        # early return. Wear-state packets carry no action and must still be
+        # recorded while nothing is displayed, because the state outlasts the
+        # card: a card shown now, then pocketed, is still not observable.
+        if data[1] in WEAR_STATE_EVENTS:
+            self.observable = WEAR_STATE_EVENTS[data[1]]
+            log.debug("wear state %s -> observable=%s",
+                      TOUCH_EVENT_NAMES.get(data[1], hex(data[1])),
+                      self.observable)
         action = self.touch_actions.get(data[1])
         if action is None:
             return

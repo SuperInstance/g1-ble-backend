@@ -31,6 +31,7 @@ changed* is more useful than a clean final story.
 | 18 | [Personalisation, measured](18-personalisation-measured.md) | The A/B finally run, the verdict, and the removal — including a third injection site that was never wired to anything. |
 | 19 | [The wiring audit](19-wiring-audit.md) | What is described as working and is not: the dormant plugin seam, a gate that stopped running, and a decision function that did not exist. |
 | 20 | [The evidence bridge](20-evidence-bridge.md) | Why the policy could not change, a metric that measured its own deferrals, and absent-is-not-zero. |
+| 21 | [Phase 3 findings](21-phase3-findings.md) | Two bugs that would have shipped, the observability cell, and why the 299-push target is unreachable. |
 
 The synthesised design is [`../DESIGN.md`](../DESIGN.md).
 

@@ -167,6 +167,34 @@ ACKNOWLEDGED_DEAD: dict[str, tuple[str, str]] = {
         "any commit.",
         "Deletion.",
     ),
+    "settled_by_evidence": (
+        "policy.py: True only when a metric, not a person, decided the axis. "
+        "Reads main.py --queue and --evidence, which is deliberate: a dry run "
+        "that shows PUSH rows because somebody pinned an axis by hand looks "
+        "exactly like one showing them on evidence.",
+        "Already used. Listed here because it was unacknowledged for one "
+        "commit while it had no caller, which is the guard working.",
+    ),
+    "record_push": (
+        "memory.py: writes push INTENT, called by experiments/interrupt_gate.py "
+        "only. There is no shipped push path, so nothing in the product "
+        "records a push yet -- which is exactly why the budget used to be a "
+        "counter that could only climb.",
+        "The first send function. It must be called BEFORE the BLE write, so "
+        "a crash mid-send still spends the budget.",
+    ),
+    "settle_push": (
+        "memory.py: attaches an outcome to a recorded attempt. Experiment-only "
+        "for the same reason as record_push -- there is no delivery to "
+        "settle.",
+        "The send function, once one exists. The budget is spent on ATTEMPT, "
+        "not on success, so this only annotates.",
+    ),
+    "push_rows": (
+        "memory.py: audit accessor for the push log. No shipped caller.",
+        "A --pushes command, or the review UI. Until then it is exercised by "
+        "experiments/interrupt_gate.py only.",
+    ),
     "as_json": (
         "interrupt.py: the documented outbox format writer. Used by the "
         "round-trip check in experiments/interrupt_gate.py and intended for "

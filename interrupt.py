@@ -96,6 +96,27 @@ class Candidate:
 
     @classmethod
     def from_json(cls, raw: dict) -> "Candidate":
+        """
+        Parse one spool record. Accepts ``class`` as well as ``cls``.
+
+        That tolerance is not politeness, it is a bug fix. ``sim/events.py``
+        writes the documented spool format with the key ``"class"`` --
+        ``Candidate.as_spool_json()`` -- because that is what it has always
+        written. This parser originally read only ``"cls"``, matching its own
+        dataclass field, so every candidate the simulator produced parsed
+        with ``cls="unknown"``, failed G2 eligibility with "class 'unknown'
+        is not in the G2 rule set", and queued forever.
+
+        Nothing would have raised. The queue would simply have decided that
+        nothing was ever worth interrupting, which reads exactly like a
+        working system being conservative, and the cause -- a key name -- is
+        nowhere in the output. Found by round-tripping the simulator through
+        its own documented format; it is the first defect found by the rule
+        "if two modules agree on a contract, test the contract."
+
+        ``class`` is preferred on read because it is the documented external
+        field name; ``cls`` is accepted for this module's own writer.
+        """
         ts = raw.get("ts")
         if isinstance(ts, str):
             parsed = datetime.fromisoformat(ts)
@@ -109,7 +130,7 @@ class Candidate:
             parsed = datetime.now(timezone.utc)
         return cls(
             source=str(raw.get("source", "unknown")),
-            cls=str(raw.get("cls", "unknown")),
+            cls=str(raw.get("class", raw.get("cls", "unknown"))),
             line=str(raw.get("line", "")),
             ts=parsed,
             subject=str(raw.get("subject", "")),
@@ -301,17 +322,22 @@ class Budget:
         self.pushes_today += 1
         self.pushes_last_hour += 1
 
-    # There is deliberately NO method here that recounts pushes_last_hour from
-    # timestamps. One was written, and it was dead on arrival: nothing in the
-    # shipped package records WHEN a push happened, because nothing sends
+    # There is deliberately NO method here that recounts pushes_last_hour
+    # from timestamps. One was written, and it was dead on arrival: nothing in
+    # the shipped package recorded WHEN a push happened, because nothing sent
     # pushes -- this module is dry-run only. A counter that only ever
-    # increments is wrong after the first hour, so this is a known gap and not
-    # a hidden one. It gets closed when a push path exists and can supply the
-    # timestamps, which is the point at which it would be worth testing.
+    # increments is wrong after the first hour, so this was a known gap and
+    # not a hidden one.
     #
-    # Recorded rather than shipped, because shipping a function whose docstring
-    # claims it prevents a bug, that nothing calls, is precisely the defect
-    # experiments/wiring_audit.py exists to catch. It caught this one.
+    # That gap is now CLOSED on the storage side: memory.FeedbackStore grew a
+    # `push_events` table plus record_push()/push_counts(), and
+    # evidence_from_store() above reads it. The recount lives there rather
+    # than here, because it needs a store and this class deliberately has
+    # none.
+    #
+    # Recorded because the audit caught exactly this function once already --
+    # written with a docstring about the bug it prevented, called by nothing.
+    # The fix was to give it a caller, not to keep the note.
 
 
 def load_outbox(directory: Path = OUTBOX) -> list[Candidate]:
@@ -461,12 +487,28 @@ def evidence_from_store(store) -> tuple["Budget", dict]:
     else:
         mark("drill_miss_rate", None, source=False)
 
-    # -- push budget: the count of what actually happened ------------------
+    # -- push budget: counted from recorded attempts, never accumulated ----
     #
-    # With no shipped push path there is nothing to count, and the counters
-    # stay at zero so the budget constraint reads "nothing spent yet" rather
-    # than blocking. That is the correct default and NOT a measurement.
-    prov["pushes_today"] = "derived" if counts.get("shown") else "no push path"
+    # This used to be `budget.pushes_last_hour`, a counter that `spend()`
+    # incremented and nothing ever decremented. That is correct for the span
+    # of one plan() call and wrong for a process: a long-running loop would
+    # reach 2/2 after two pushes and then refuse forever, with a log full of
+    # successful pushes and no explanation. A silent daemon is worse than a
+    # broken one, because a broken one gets noticed.
+    #
+    # So the budget is counted from durable rows (memory.push_events), which
+    # is the same construct `Budget.prune` used to be and could not be,
+    # because nothing recorded WHEN a push happened. That table exists now.
+    prov["pushes_last_hour"] = "derived"
+    prov["pushes_today"] = "derived"
+    try:
+        hourly, daily = store.push_counts()
+        budget.pushes_last_hour = hourly
+        budget.pushes_today = daily
+    except Exception as exc:                       # noqa: BLE001
+        log.warning("could not read push counts: %s", exc)
+        prov["pushes_last_hour"] = "unavailable: %s" % exc
+        prov["pushes_today"] = "unavailable: %s" % exc
 
     # -- the four with no source at all ------------------------------------
     #

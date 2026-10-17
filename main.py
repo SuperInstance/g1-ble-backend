@@ -490,11 +490,22 @@ async def run(args: argparse.Namespace) -> int:
             axis_id, _, option = pair.partition("=")
             overrides[axis_id.strip()] = option.strip()
         try:
-            path = save_overrides(overrides)
+            path = save_overrides(
+                overrides,
+                ttl_s=(args.override_ttl_hours * 3600.0
+                       if args.override_ttl_hours else None),
+            )
         except ValueError as exc:
             print(f"invalid: {exc}", file=sys.stderr)
             return 2
+        ttl = args.override_ttl_hours
         print(f"saved overrides -> {path}")
+        if ttl:
+            print(f"  they EXPIRE {ttl:g}h from now; the expiry is checked "
+                  f"when the policy loads, so nothing has to remember them.")
+        else:
+            print("  no TTL set -- these persist until changed by hand. Pass "
+                  "--override-ttl-hours if this is a test pin.")
 
     if args.weights:
         from memory import MIN_CARDS_FOR_INTEREST, FeedbackStore
@@ -566,6 +577,13 @@ async def run(args: argparse.Namespace) -> int:
                       f"—  <-- ABSENT, not zero")
 
         print(f"\n  policy as resolved:\n{_indent(pol.report(), '    ')}")
+        manual = pol.manual()
+        if manual:
+            print(f"\n  MANUAL pins, NOT measurements: {', '.join(manual)}")
+            print("  An axis here was set by hand, not by its deciding metric.")
+            print("  settled_by_evidence() is false for these, so anything")
+            print("  irreversible should refuse them without an explicit")
+            print("  acknowledgement. `--policy-axes` shows the metrics.")
         store.close()
         return 0
 
@@ -593,6 +611,16 @@ async def run(args: argparse.Namespace) -> int:
             print(f"  !! label_days forced to {args.queue_label_days}; this is "
                   f"NOT the default posture")
         print(f"\n  policy:\n{_indent(pol.report(), '    ')}")
+        # A dry run that shows PUSH rows because somebody pinned an axis by
+        # hand looks exactly like one showing them on evidence. Say which.
+        if pol.manual():
+            pinned = ", ".join(pol.manual())
+            print(f"\n  MANUAL pins in effect: {pinned}")
+            if pol.get("push_enabled") == "on" and not pol.settled_by_evidence(
+                    "push_enabled"):
+                print("  push_enabled=on is a HAND PIN, not a measurement. "
+                      "Any live path must refuse this without an explicit "
+                      "acknowledgement.")
         if not verdicts:
             print("\n  nothing waiting.")
         else:
@@ -951,7 +979,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--set-policy", metavar="AXIS=OPTION", action="append",
         help="pin a policy axis manually, e.g. --set-policy g1_model=on "
-             "(persists to the policy file)",
+             "(persists to the policy file). A pin is MANUAL, not evidence: "
+             "it is reported as unresolved and `settled_by_evidence()` is "
+             "false for it, so anything irreversible can refuse one. Pair "
+             "with --override-ttl-hours so a test pin cannot outlive the test.",
+    )
+    parser.add_argument(
+        "--override-ttl-hours", type=float, default=0.0, metavar="H",
+        help="expire the overrides set by this command after H hours "
+             "(0 = never expire). Expiry is checked when the policy is "
+             "LOADED, so a pin lapses on its own rather than needing someone "
+             "to remember it exists.",
     )
 
     # -- connection -------------------------------------------------------

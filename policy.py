@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -182,6 +183,23 @@ class Decision:
     reason: str
     evidence: dict = field(default_factory=dict)
     enough_evidence: bool = True
+    # True when a human pinned this by hand rather than a metric settling it.
+    #
+    # Added because `enough_evidence` was doing a job it could not do. An
+    # override used to be recorded as Decision(..., True), so `--set-policy
+    # push_enabled=on` produced an axis that Policy.unresolved() did not list
+    # and that any gate keyed on "is this settled?" would read as MEASURED. It
+    # was a hand assertion wearing the clothes of a measurement, and it
+    # persists in policy.json, so it would be re-applied by any future
+    # unattended process at startup. The canonical failure is a test switch
+    # that outlives the test session: someone flips an axis on to see
+    # something happen, and three weeks later a daemon is live with it.
+    #
+    # Overrides are now manual=True and enough_evidence=False. They still
+    # take effect -- that is the point of an override -- but they can no
+    # longer masquerade as evidence, and `Policy.manual()` names them so a
+    # gate that needs a real measurement can refuse one.
+    manual: bool = False
 
 
 def _resolve_examination_source(ev: dict) -> Decision:
@@ -300,6 +318,27 @@ class Policy:
     def unresolved(self) -> list[str]:
         return [d.axis for d in self.decisions.values() if not d.enough_evidence]
 
+    def manual(self) -> list[str]:
+        """Axes a human pinned, rather than a metric settling.
+
+        The set that matters for anything irreversible. `--evidence` prints
+        it, and any future path that pushes to a person's face should refuse
+        an axis that appears here unless the operator passed an explicit
+        "I know this is unmeasured" flag -- because the whole failure mode
+        of a manual override is that it looks identical to a settled one.
+        """
+        return [d.axis for d in self.decisions.values() if d.manual]
+
+    def settled_by_evidence(self, axis_id: str) -> bool:
+        """
+        True only if a metric, not a person, decided this axis.
+
+        Use this, not ``enough_evidence``, for any gate whose failure is
+        visible on someone's face.
+        """
+        d = self.decisions.get(axis_id)
+        return bool(d and d.enough_evidence and not d.manual)
+
     def report(self) -> str:
         lines = []
         for axis in POLICY_AXES:
@@ -346,7 +385,7 @@ def resolve(evidence: Optional[dict] = None,
                 axis.id, chosen,
                 f"manual override; would have been "
                 f"{decision.option} ({decision.reason})",
-                axis_evidence, True,
+                axis_evidence, False, manual=True,
             )
         decisions[axis.id] = decision
 
@@ -362,19 +401,69 @@ def policy_path() -> Path:
 
 
 def load(evidence: Optional[dict] = None) -> Policy:
-    """Resolve from evidence plus any saved manual overrides."""
+    """
+    Resolve from evidence plus any saved manual overrides.
+
+    Expired overrides are dropped here rather than at write time, so an
+    override with a TTL stops applying the moment it lapses even if nobody
+    re-runs the command that set it. That is the difference between an expiry
+    and a reminder.
+    """
     overrides: dict[str, str] = {}
     path = policy_path()
     if path.exists():
         try:
-            overrides = json.loads(path.read_text()).get("overrides", {})
-        except (json.JSONDecodeError, OSError) as exc:
+            raw = json.loads(path.read_text())
+            overrides = _prune_expired(raw.get("overrides", {}),
+                                       raw.get("set_at", {}),
+                                       raw.get("ttl_s"))
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError) as exc:
             log.warning("could not read saved overrides: %s", exc)
     return resolve(evidence, overrides)
 
 
-def save_overrides(overrides: dict[str, str]) -> Path:
-    """Persist manual overrides so they survive restarts."""
+def _prune_expired(overrides: dict, set_at: dict, ttl_s) -> dict:
+    """Drop overrides whose TTL has passed.
+
+    Malformed records are KEPT rather than dropped. That is the right failure
+    direction: a TTL file we cannot parse means we do not know when the pin
+    lapses, and silently discarding an operator's override is more surprising
+    than honouring one slightly too long.
+    """
+    if not isinstance(overrides, dict):
+        return {}
+    if not ttl_s or not isinstance(set_at, dict):
+        return dict(overrides)
+    try:
+        ttl = float(ttl_s)
+    except (TypeError, ValueError):
+        log.warning("unusable override ttl %r; ignoring the expiry", ttl_s)
+        return dict(overrides)
+    now = time.time()
+    alive: dict[str, str] = {}
+    for axis_id, option in overrides.items():
+        stamp = set_at.get(axis_id)
+        if not isinstance(stamp, (int, float)):
+            alive[axis_id] = option        # no stamp recorded: keep, as before
+            continue
+        if (now - stamp) > ttl:
+            log.warning("override for %s expired after %.0fs; ignoring",
+                        axis_id, ttl)
+            continue
+        alive[axis_id] = option
+    return alive
+
+
+def save_overrides(overrides: dict[str, str], ttl_s: Optional[float] = None) -> Path:
+    """
+    Persist manual overrides so they survive restarts.
+
+    ``ttl_s``, when given, stamps each override with an expiry so ``load()``
+    stops honouring it. This exists for one specific accident: pinning an
+    axis on to watch something happen, forgetting, and finding weeks later
+    that a live process has been running on the pin. Without a TTL an
+    override is permanent; with one it stops on its own.
+    """
     for axis_id, option in overrides.items():
         if axis_id not in AXES_BY_ID:
             raise ValueError(f"unknown axis {axis_id!r}")
@@ -384,7 +473,12 @@ def save_overrides(overrides: dict[str, str]) -> Path:
             )
     path = policy_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"overrides": overrides}, indent=2))
+    now = time.time()
+    payload: dict = {"overrides": overrides}
+    if ttl_s:
+        payload["set_at"] = {k: now for k in overrides}
+        payload["ttl_s"] = ttl_s
+    path.write_text(json.dumps(payload, indent=2))
     return path
 
 

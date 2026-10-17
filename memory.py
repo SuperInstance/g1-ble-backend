@@ -46,6 +46,8 @@ import re
 import sqlite3
 import threading
 import time
+import hashlib
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -416,6 +418,33 @@ class FeedbackStore:
                 value      TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+
+            -- Push INTENT, recorded before any bytes are written.
+            --
+            -- This table exists because the budget could not be computed
+            -- without it. `interrupt.Budget` used to increment counters as
+            -- pushes were decided, so `pushes_last_hour` only ever went up
+            -- and a long-running process would hit the 2/hour cap after two
+            -- pushes and then never interrupt again -- a daemon that looks
+            -- perfectly healthy in the log and is silent for the rest of the
+            -- day. Counting instead requires knowing WHEN, so the timestamp
+            -- has to be durable, and it has to survive a crash mid-write.
+            --
+            -- Recorded before the write, not after, for the same reason: a
+            -- host that dies between deciding and sending must still show the
+            -- attempt. A push that may have reached a lens has cost attention
+            -- and must count against the budget; one that definitely did not
+            -- is cheaper to fix than one that definitely did and went
+            -- unrecorded.
+            CREATE TABLE IF NOT EXISTS push_events (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts        REAL    NOT NULL,
+                cls       TEXT    NOT NULL,
+                source    TEXT    NOT NULL DEFAULT '',
+                text_hash TEXT    NOT NULL DEFAULT '',
+                outcome   TEXT    NOT NULL DEFAULT 'attempted'
+            );
+            CREATE INDEX IF NOT EXISTS idx_push_ts ON push_events(ts);
             """
             )
             self._conn.commit()
@@ -852,6 +881,80 @@ class FeedbackStore:
                 "detail alongside the headline."
             )
         return " ".join(lines)
+
+    # -- push intent -------------------------------------------------------
+    #
+    # The budget depends on these, and only on these. A counter held in
+    # memory and incremented on decision is the construct that made
+    # `pushes_last_hour` monotonic; counting rows by timestamp cannot drift
+    # from the decision the same way, and it survives a restart.
+
+    @_synchronized
+    def record_push(self, cls: str, *, source: str = "",
+                    text: str = "", outcome: str = "attempted",
+                    ts: Optional[float] = None) -> int:
+        """
+        Record the intent to push. Call this BEFORE writing to the glasses.
+
+        Returns the row id so a later :meth:`settle_push` can attach the
+        outcome to the same attempt.
+        """
+        digest = hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+        now = time.time() if ts is None else float(ts)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO push_events (ts, cls, source, text_hash, outcome) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (now, cls, source, digest, outcome),
+            )
+            return int(cur.lastrowid)
+
+    @_synchronized
+    def settle_push(self, row_id: int, outcome: str) -> bool:
+        """Record how an attempt actually went. Never moves the timestamp.
+
+        The timestamp stays put on purpose: the budget is spent on ATTEMPT,
+        not on success. A card that half-rendered on one lens did cost the
+        wearer attention, and a flapping link should fail quiet at four
+        wasted pushes a day rather than hammer through them.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE push_events SET outcome = ? WHERE id = ?",
+                (outcome, int(row_id)),
+            )
+            return True
+
+    @_synchronized
+    def push_counts(self, now: Optional[float] = None,
+                    *, hour_window: float = 3600.0) -> tuple[int, int]:
+        """
+        ``(pushes_last_hour, pushes_today)``, counted from recorded attempts.
+
+        Local-time day boundaries, matching how a person experiences "today".
+        A UTC day would hand someone their budget back at four in the
+        afternoon.
+        """
+        now = time.time() if now is None else float(now)
+        day = datetime.fromtimestamp(now).date()
+        day_start = datetime.combine(day, datetime.min.time()).timestamp()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts FROM push_events WHERE ts >= ?", (day_start,)
+            ).fetchall()
+        hourly = sum(1 for r in rows if r["ts"] >= now - hour_window)
+        return hourly, len(rows)
+
+    @_synchronized
+    def push_rows(self, *, since_days: float = 30.0) -> list[dict]:
+        """Every recorded attempt, oldest first. For audit and tests."""
+        cutoff = time.time() - since_days * 86400.0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, cls, source, text_hash, outcome "
+                "FROM push_events WHERE ts >= ? ORDER BY ts", (cutoff,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def event_total(self) -> int:
         """Total reactions recorded; the gate for the higher-level pass."""
