@@ -103,6 +103,7 @@ def main() -> int:
 
     scores: list[float] = []
     latencies: list[float] = []
+    models_seen: dict[str, int] = {}
     skipped = 0
     client = None
     try:
@@ -119,6 +120,7 @@ def main() -> int:
             continue
         scores.append(v.worth_interrupting)
         latencies.append(v.latency_ms)
+        models_seen[v.model] = models_seen.get(v.model, 0) + 1
         if i <= 5:
             print(f"  {i:>2}  p={v.worth_interrupting:.3f}  "
                   f"conf={v.confidence:.3f}  {v.latency_ms:>5.0f}ms  {text[:38]!r}")
@@ -128,6 +130,27 @@ def main() -> int:
     if not scores:
         print("\nSKIP  no usable responses -- check the key")
         return 0
+
+    # Every number below is a property of ONE model answering. `DEFAULT_MODEL`
+    # is the floating alias "jev-latest", so the model can change under a
+    # measurement with no diff and no commit -- these figures would silently
+    # stop meaning what the last run meant. Record what actually answered, and
+    # refuse to report a headline number if the answers were not all the same.
+    #
+    # Measured on this account, 2026-10-17: "jev-latest" resolves to
+    # jev-1.13.0 while "jev-preview" resolves to jev-1.14.0. The alias called
+    # "latest" is BEHIND the preview, which is the opposite of what the name
+    # implies and is not discoverable without asking the API.
+    print(f"model  requested {jev.DEFAULT_MODEL!r} -> answered by "
+          + ", ".join(f"{m} (x{n})" for m, n in sorted(models_seen.items())))
+    if len(models_seen) > 1:
+        print("\n  REFUSING to report: more than one model answered this run.")
+        print("  A single AUC/ECE across two models describes neither. Re-run.")
+        return 1
+    resolved = next(iter(models_seen))
+    if resolved != jev.DEFAULT_MODEL:
+        print(f"    (the alias resolved to a different build -- pin it before "
+              f"comparing runs)")
 
     used_i = interrupt_labels[: len(scores)]
     used_q = queue_labels[: len(scores)]
