@@ -31,6 +31,12 @@ Thumbs.db
 # Local capture artifacts
 *.log
 capture/
+# .capture_keep/ is a byte-identical local copy of the captures that live in
+# /mnt/c/proart_capture/ (empty1.nv12 here is sha256 da348ccaf08c030de...,
+# the same file). It exists so the scripts have a local path to read, and
+# it is 91 MB of raw camera data. The canonical capture location is
+# outside version control and stays there.
+.capture_keep/
 
 # Local SQLite ledgers. The schema is in documents/09-schema.sql and the
 # code that creates them is in memory.py, so the databases themselves are
